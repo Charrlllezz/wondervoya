@@ -1605,7 +1605,15 @@ items-center justify-center bg-black">
 
       {/* Universal Template Modal */}
       <Dialog open={showUniversalTemplate} onOpenChange={setShowUniversalTemplate}>
-        <DialogContent className="sm:max-w-md bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 shadow-2xl fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 transition-none animate-none">
+        <DialogContent
+          className="sm:max-w-md bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 shadow-2xl fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 transition-none animate-none"
+          onPointerDownOutside={(e) => {
+            if (showDatePicker) e.preventDefault();
+          }}
+          onInteractOutside={(e) => {
+            if (showDatePicker) e.preventDefault();
+          }}
+        >
           <div className="p-6">
             <DialogHeader>
               <DialogTitle 
