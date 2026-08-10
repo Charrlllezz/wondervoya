@@ -47,7 +47,7 @@
     "helmet": "^8.1.0",
     "lucide-react": "^0.453.0",
     "multer": "^2.0.1",
-    "nanoid": "^5.1.5",
+    "nanoid": "^5.1.16",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "react": "^18.3.1",
@@ -82,5 +82,8 @@
   },
   "optionalDependencies": {
     "bufferutil": "^4.0.8"
+  },
+  "overrides": {
+    "nanoid": "^5.1.16"
   }
 }
