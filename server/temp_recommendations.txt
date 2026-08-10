@@ -1,0 +1,830 @@
+  app.post("/api/conversation/recommendations", async (req, res) => {
+    try {
+      const { sessionId, message } = req.body;
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔍 Recommendations request received:', { sessionId, messageLength: message?.length });
+        console.log('📋 Passed message content:', message);
+      }
+
+      let conversation = await storage.getConversation(sessionId || '');
+
+      // Improved deduplication - only check for actual user input, not AI responses
+      let userInputKey = '';
+
+      // Try to extract the actual user input from the message
+      if (conversation && conversation.messages && conversation.messages.length > 0) {
+        const userMessages = conversation.messages.filter(msg => msg.sender === 'user');
+        if (userMessages.length > 0) {
+          const lastUserMessage = userMessages[userMessages.length - 1];
+          userInputKey = `${sessionId}-user-${lastUserMessage.text}`;
+        }
+      }
+
+      // If we have a user input key, check for duplicates
+      const now = Date.now();
+      if (userInputKey && app.locals.recentRequests?.has(userInputKey)) {
+        const lastProcessed = app.locals.recentRequests.get(userInputKey);
+        if (now - lastProcessed < 1000) { // Reduced to 1 second for better UX
+          console.log('🚫 Duplicate user request detected, skipping:', userInputKey.substring(0, 100) + '...');
+          return res.json({ recommendations: [], shouldShowRecommendations: false, sessionId });
+        }
+      }
+
+      // Initialize tracking if needed
+      if (!app.locals.recentRequests) {
+        app.locals.recentRequests = new Map();
+      }
+
+      // Track this request using user input key
+      if (userInputKey) {
+        app.locals.recentRequests.set(userInputKey, now);
+      }
+
+      // Clean up old entries (keep only last 100)
+      if (app.locals.recentRequests.size > 100) {
+        const oldestKeys = Array.from(app.locals.recentRequests.keys()).slice(0, 50);
+        oldestKeys.forEach(key => app.locals.recentRequests.delete(key));
+      }
+      console.log('🔍 Storage lookup result:', conversation ? 'found conversation' : 'no conversation found');
+
+      // CRITICAL: Always use the current message passed to this endpoint
+      let userMessage = message; // Use the message parameter directly
+
+      // Only fall back to conversation history if no message is passed
+      if (!userMessage && conversation && conversation.messages && conversation.messages.length > 0) {
+        // Find the last user message (most recent user input)
+        const userMessages = conversation.messages.filter(msg => msg.sender === 'user');
+        if (userMessages.length > 0) {
+          const lastUserMessage = userMessages[userMessages.length - 1];
+          userMessage = lastUserMessage.text;
+          console.log('🔄 FALLBACK: Using last user message from conversation:', userMessage);
+        }
+      }
+
+      console.log('🎯 USING MESSAGE FOR SEARCH:', userMessage);
+
+      if (!conversation) {
+        console.log('⚠️ No conversation found, creating temporary one for recommendations');
+        // Create a temporary conversation for recommendations
+        conversation = {
+          sessionId: sessionId || 'temp',
+          messages: [],
+          travelPreferences: {},
+          lastRecommendations: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      console.log('🔍 Conversation status:', conversation ? 'available' : 'missing');
+      console.log('🔍 About to start recommendation logic');
+
+      // Use existing recommendation logic from the main endpoint
+      let recommendations = null;
+      let shouldShowRecommendations = false;
+
+      let updatedPreferences = (conversation.travelPreferences || {}) as any;
+      console.log('🔍 Initial updatedPreferences:', updatedPreferences);
+
+      // Safely check message content (handle undefined/null)
+      const messageText = userMessage || '';
+      console.log('🔍 Using message for search:', messageText);
+
+      // Check if message contains clear travel intent with destination (reusing existing logic)
+      const hasDestination = /\b(in|to|visit|going|traveling|trip|vacation|holiday)\s+([A-Z][a-zA-Z\s,]+)/i.test(messageText) ||
+                            /\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+(trip|vacation|activities|tours|things to do)/i.test(messageText);
+
+      const hasActivityIntent = /\b(activities|tours|things to do|attractions|experiences|food|restaurant|museum|beach|hiking|adventure|cultural|nightlife|shopping|sightseeing|visit|see|explore|show me)/i.test(messageText);
+
+      const shouldSearchNow = hasDestination || hasActivityIntent || 
+                             messageText.toLowerCase().includes('museum') ||
+                             messageText.toLowerCase().includes('culture') ||
+                             (updatedPreferences?.destination && conversation.messages.length >= 3) ||
+                             messageText.toLowerCase().includes('tokyo') ||
+                             messageText.toLowerCase().includes('yes');
+
+      console.log('🔍 Search detection:', { hasDestination, hasActivityIntent, shouldSearchNow });
+      console.log('🔍 Message includes museum:', messageText.toLowerCase().includes('museum'));
+      console.log('🔍 Message includes paris:', messageText.toLowerCase().includes('paris'));
+      console.log('🔍 Current conversation:', conversation ? 'found' : 'not found');
+
+      if (shouldSearchNow) {
+        try {
+          const currency = updatedPreferences?.budget?.currency || 'USD';
+          let searchQuery = extractActivityKeywords(messageText, updatedPreferences);
+          searchQuery = cleanSearchQuery(searchQuery);
+
+          // Cache key for this specific search
+          const cacheKey = `${searchQuery}-${currency}-${JSON.stringify(updatedPreferences?.destination || '')}`;
+
+          console.log('🔍 RECOMMENDATIONS ENDPOINT: Starting search flow...');
+          console.log('🔍 Extracted search query:', searchQuery);
+          console.log('🔍 Original message text:', messageText);
+
+          // Use cached Viator destinations for all matching operations
+          const destinations = await enhancedViatorService.getDestinations();
+          const { smartDestinationMatcher } = await import('./services/smart-destination-matcher');
+          smartDestinationMatcher.setDestinations(destinations);
+
+          // Cache and optimize destination extraction
+          let targetDestination = null;
+          let extractedDestination = null;
+
+          // Check if we already have a cached destination in preferences
+          if (updatedPreferences?.destination?.id) {
+            try {
+              targetDestination = destinations.find(d => d.id === updatedPreferences.destination.id);
+              if (targetDestination) {
+                console.log('🔍 Using cached destination from preferences:', targetDestination.name, '(ID:', targetDestination.id, ')');
+              }
+            } catch (error) {
+              console.log('⚠️ Error using cached destination:', error);
+            }
+          }
+
+          // Use smart destination matcher for consistent extraction
+          if (!targetDestination) {
+            console.log('🔍 Using smart destination matcher for:', messageText);
+            const extractedDestinationFromMessage = extractDestinationFromContext(messageText, updatedPreferences, explicitDestination);
+            
+            if (extractedDestinationFromMessage) {
+              targetDestination = smartDestinationMatcher.extractDestinationFromSearch(extractedDestinationFromMessage, destinations);
+              
+              if (targetDestination) {
+                // Validate the destination ID exists in our cache
+                const validDestination = destinations.find(d => d.id === targetDestination.id || d.destinationId === targetDestination.id);
+                
+                if (validDestination) {
+                  console.log(`📍 Smart matcher found: ${targetDestination.name} (ID: ${targetDestination.id})`);
+                  // CRITICAL FIX: Store destination in updatedPreferences for response context
+                  updatedPreferences.destination = {
+                    id: targetDestination.id,
+                    name: targetDestination.name,
+                    country: targetDestination.country
+                  };
+                  console.log('💾 Stored destination context in preferences:', updatedPreferences.destination);
+                  // Also store the search query for context
+                  updatedPreferences.lastSearchQuery = searchQuery;
+                } else {
+                  console.log(`❌ Smart matcher returned invalid destination ID: ${targetDestination.id}`);
+                  targetDestination = null; // Invalidate if not found in cache
+                }
+              }
+            } else {
+              console.log(`❌ No destination context available in message for search`);
+            }
+          }
+
+          // Fallback to simple keyword matching for known cities if smart matcher fails
+          if (!targetDestination) {
+            console.log('🔧 No valid destination found via smart matching, trying simple keyword fallback...');
+            const lowerMessage = messageText.toLowerCase();
+            if (lowerMessage.includes('paris')) {
+              targetDestination = destinations.find(d => d.name === 'Paris, France');
+              console.log('🔧 FALLBACK: Found Paris destination via simple search');
+            } else if (lowerMessage.includes('london')) {
+              targetDestination = destinations.find(d => d.name === 'London, United Kingdom');
+              console.log('🔧 FALLBACK: Found London destination via simple search');
+            } else if (lowerMessage.includes('tokyo')) {
+              targetDestination = destinations.find(d => d.name === 'Tokyo Prefecture');
+              console.log('🔧 FALLBACK: Found Tokyo destination via simple search');
+            } else if (lowerMessage.includes('los angeles') || lowerMessage.includes('la') || lowerMessage.includes('l.a.')) {
+              targetDestination = destinations.find(d => d.name === 'Los Angeles, United States');
+              console.log('🔧 FALLBACK: Found Los Angeles destination via simple search');
+            }
+
+            if (targetDestination) {
+              updatedPreferences.destination = {
+                id: targetDestination.id,
+                name: targetDestination.name,
+                country: targetDestination.country
+              };
+              console.log('💾 FALLBACK: Stored destination context:', updatedPreferences.destination);
+              updatedPreferences.lastSearchQuery = searchQuery;
+            }
+          }
+
+          if (targetDestination) {
+            console.log('🎯 CONFIRMED: Searching activities for:', targetDestination.name, '(ID:', targetDestination.id, ') with interests:', searchQuery);
+
+            // 🚀 ULTIMATE SEARCH ENGINE: Use world-class multi-strategy search
+            try {
+              // Enhanced search terms based on destination and user interests
+              let searchTerms = searchQuery;
+              const confirmedDestinationId = targetDestination.id; // Use the validated destination ID
+
+              if (confirmedDestinationId === 645) { // Los Angeles
+                if (messageText.toLowerCase().includes('film') || messageText.toLowerCase().includes('movie') || messageText.toLowerCase().includes('studio') || messageText.toLowerCase().includes('hollywood')) {
+                  searchTerms = 'film studio movie hollywood backlot'; // More specific, less broad terms
+                }
+              } else if (confirmedDestinationId === 479) { // Paris
+                if (messageText.toLowerCase().includes('wine') || messageText.toLowerCase().includes('cuisine') || messageText.toLowerCase().includes('food')) {
+                  searchTerms = 'food tour wine tasting cooking class culinary walking tour market tour chef guided gastronomy';
+                }
+              } else if (confirmedDestinationId === 186) { // London
+                if (messageText.toLowerCase().includes('culture') || messageText.toLowerCase().includes('history')) {
+                  searchTerms = 'culture history museums tours';
+                }
+              }
+
+              console.log(`🔍 Enhanced search terms for ${targetDestination.name}: "${searchTerms}"`);
+
+              // 🎯 SMART CATEGORY DETECTION: Auto-detect activity type for targeted search
+              let premiumResults;
+              // Simple category detection function
+              const detectActivityCategory = (message) => {
+                const text = message.toLowerCase();
+
+                if (text.includes('food') || text.includes('wine') || text.includes('culinary') || 
+                    text.includes('cooking') || text.includes('dining') || text.includes('restaurant') ||
+                    text.includes('tasting') || text.includes('cuisine')) {
+                  return { name: 'Food & Wine', categoryId: 130 };
+                }
+
+                if (text.includes('cruise') || text.includes('boat') || text.includes('sailing') ||
+                    text.includes('water') || text.includes('diving') || text.includes('swim')) {
+                  return { name: 'Water Activities', categoryId: 138 };
+                }
+
+                if (text.includes('museum') || text.includes('culture') || text.includes('history') ||
+                    text.includes('art') || text.includes('gallery') || text.includes('monument')) {
+                  return { name: 'Cultural', categoryId: 135 };
+                }
+
+                return null;
+              };
+
+              const detectedCategory = detectActivityCategory(messageText);
+
+              if (detectedCategory) {
+                console.log(`🎯 ${detectedCategory.name.toUpperCase()} SEARCH: Using Ultimate Search Engine with category filtering`);
+                try {
+                  // 🚀 INTEGRATE ULTIMATE SEARCH ENGINE 
+                  const ultimateSearchRequest = {
+                    query: searchTerms,
+                    destinationId: confirmedDestinationId,
+                    currency: currency || 'USD',
+                    maxResults: 8,
+                    userPreferences: {
+                      budget: extractBudgetPreferences(messageText, currency)?.max > 100 ? 'luxury' : 'mid',
+                      duration: extractDurationPreferences(messageText)?.max > 360 ? 'full_day' : 'medium',
+                      interests: [searchTerms]
+                    }
+                  };
+
+                  console.log('🚀 ULTIMATE ENGINE REQUEST:', ultimateSearchRequest);
+
+                  const ultimateResults = await ultimateViatorEngine.search(ultimateSearchRequest);
+                  premiumResults = ultimateResults.activities;
+
+                  console.log(`🚀 ULTIMATE ENGINE: Found ${premiumResults.length} highly relevant activities for ${targetDestination.name}`);
+
+                  // Ultimate Search Engine already provides optimal results, no additional filtering needed
+                } catch (categoryError) {
+                  console.log('⚠️ Ultimate Engine specific category search failed, using general ultimate search');
+                  const fallbackRequest = {
+                    query: searchTerms,
+                    destinationId: confirmedDestinationId,
+                    currency: currency || 'USD',
+                    maxResults: 8,
+                    userPreferences: { budget: 'mid', duration: 'medium', interests: [searchTerms] }
+                  };
+                  const fallbackResults = await ultimateViatorEngine.search(fallbackRequest);
+                  premiumResults = fallbackResults.activities;
+                }
+              } else {
+                // Use Ultimate Search Engine for all other categories
+                const generalRequest = {
+                  query: searchTerms,
+                  destinationId: confirmedDestinationId,
+                  currency: currency || 'USD',
+                  maxResults: 8,
+                  userPreferences: {
+                    budget: extractBudgetPreferences(messageText, currency)?.max > 100 ? 'luxury' : 'mid',
+                    duration: extractDurationPreferences(messageText)?.max > 360 ? 'full_day' : 'medium',
+                    interests: [searchTerms]
+                  }
+                };
+                const generalResults = await ultimateViatorEngine.search(generalRequest);
+                premiumResults = generalResults.activities;
+              }
+
+              if (premiumResults && premiumResults.length > 0) {
+                console.log(`🏆 PREMIUM SUCCESS: Advanced ranking found ${premiumResults.length} highly-ranked activities for ${targetDestination.name}`);
+
+                recommendations = premiumResults;
+                shouldShowRecommendations = true;
+
+                // Log ranking details for premium results
+                premiumResults.slice(0, 3).forEach((activity: any, index: number) => {
+                  if (activity.rankingDetails) {
+                    console.log(`🏆 Top ${index + 1}: ${activity.title} - Overall Score: ${activity.viatorRankingScore?.toFixed(1)}`);
+                    console.log(`   Relevancy: ${activity.rankingDetails.relevancyScore?.toFixed(1)} | Quality: ${activity.rankingDetails.qualityScore?.toFixed(1)} | Performance: ${activity.rankingDetails.performanceScore?.toFixed(1)}`);
+                  }
+                });
+
+                console.log(`🎯 Final premium recommendations: ${recommendations.length} activities confirmed for ${targetDestination.name}`);
+              } else {
+                console.log('⚠️ Premium search returned no results, trying fallback approach');
+                throw new Error('Premium search failed');
+              }
+            } catch (premiumError) {
+              console.error(`❌ Premium search failed for ${targetDestination.name}:`, premiumError);
+
+              // Fallback to standard search with quality filtering
+              try {
+                const fallbackResults = await enhancedViatorService.enhancedSearch({
+                  keywords: searchQuery,
+                  destination: targetDestination.name,
+                  destinationId: targetDestination.id,
+                  currency,
+                  maxResults: 15,
+                  enforceDestination: true
+                });
+
+                if (fallbackResults.activities && fallbackResults.activities.length > 0) {
+                  recommendations = fallbackResults.activities;
+                  shouldShowRecommendations = true;
+                  console.log(`🔄 Fallback search found ${recommendations.length} activities for ${targetDestination.name}`);
+                }
+              } catch (fallbackError) {
+                console.error(`❌ Fallback search also failed for ${targetDestination.name}:`, fallbackError);
+              }
+            }
+            }
+
+            // Normal search flow (only if direct search didn't work)
+            if (!recommendations || recommendations.length === 0) {
+
+            // ADVANCED RELEVANCE ENGINE: Intelligent search with sophisticated filtering
+            console.log(`🎯 RELEVANCE ENGINE: Starting advanced search for: "${searchQuery}"`);
+
+            try {
+              // Extract user preferences for enhanced filtering
+              const extractedPreferences = {
+                duration: extractDurationPreferences(messageText),
+                budget: extractBudgetPreferences(messageText, currency),
+                groupSize: extractGroupSize(messageText),
+                travelStyle: extractTravelStyle(messageText),
+                timeOfDay: extractTimeOfDay(messageText)
+              };
+
+              console.log(`🎨 Extracted preferences:`, JSON.stringify(extractedPreferences, null, 2));
+
+              // Use the new advanced relevance engine
+              if (targetDestination && targetDestination.id) {
+                recommendations = await enhancedViatorService.searchActivitiesWithRelevance({
+                  destinationId: targetDestination.id,
+                  userMessage: messageText,
+                  interests: [searchQuery],
+                  preferences: extractedPreferences,
+                  currency,
+                  count: 10
+                });
+              } else {
+                console.log('❌ No target destination for relevance search');
+                recommendations = [];
+              }
+
+              if (recommendations.length > 0) {
+                console.log(`✅ RELEVANCE ENGINE: Found ${recommendations.length} highly relevant activities`);
+
+                // Log relevance scores for debugging
+                recommendations.forEach((rec, index) => {
+                  const score = (rec as any)._relevanceScore || 'N/A';
+                  console.log(`  ${index + 1}. ${rec.title} - Score: ${score}`);
+                });
+              } else {
+                console.log(`⚠️ RELEVANCE ENGINE: No results, falling back to tag-based search`);
+
+                // Fallback to tag-based search
+                const tagResult = await tagManager.findMatchingTags(searchQuery);
+                if (tagResult.tagIds.length > 0 && tagResult.confidence > 50 && targetDestination && targetDestination.id) {
+                  const tagBasedActivities = await enhancedViatorService.searchActivitiesWithTags({
+                    destinationId: targetDestination.id,
+                    tagIds: tagResult.tagIds,
+                    currency,
+                    count: 10
+                  });
+
+                  if (tagBasedActivities.length > 0) {
+                    recommendations = await enhancedViatorService.transformToActivityRecommendations(
+                      tagBasedActivities,
+                      currency,
+                      false,
+                      false
+                    );
+                  }
+                }
+
+                // Final fallback to keyword search with surgical filtering
+                if (!recommendations || recommendations.length === 0) {
+                  if (targetDestination && targetDestination.name) {
+                    const searchResults = await enhancedViatorService.enhancedSearch({
+                      keywords: searchQuery,
+                      destination: targetDestination.name,
+                      currency,
+                      maxResults: 25 // Increase to get more potential matches before filtering
+                    });
+                    recommendations = searchResults.activities;
+                  } else {
+                    console.log('❌ No target destination for keyword search');
+                    recommendations = [];
+                  }
+                }
+              }
+            } catch (relevanceError) {
+              console.error('❌ RELEVANCE ENGINE failed, using fallback:', relevanceError);
+
+              // Fallback to existing enhanced search with surgical filtering
+              if (targetDestination && targetDestination.name) {
+                const searchResults = await enhancedViatorService.enhancedSearch({
+                  keywords: searchQuery,
+                  destination: targetDestination.name,
+                  currency,
+                  maxResults: 25 // Increase to get more potential matches before filtering
+                });
+                // Apply surgical filtering to fallback results
+                recommendations = enhancedViatorService.applyIntelligentFiltering(searchResults.activities, messageText);
+              } else {
+                console.log('❌ No target destination for fallback search');
+                recommendations = [];
+              }
+            }
+
+            shouldShowRecommendations = true;
+            console.log('✅ Found recommendations:', recommendations?.length || 0);
+          } else {
+            console.log('❌ CRITICAL: No destination found for recommendations - this is the core bug!');
+            console.log('❌ Original message was:', messageText);
+            console.log('❌ Search query was:', searchQuery);
+
+
+
+            // If still no results, try fallback system
+            if (!recommendations || recommendations.length === 0) {
+              try {
+                const { getFallbackRecommendations } = await import('./fallback-recommendations');
+                recommendations = await getFallbackRecommendations(messageText);
+                if (recommendations && recommendations.length > 0) {
+                  shouldShowRecommendations = true;
+                  console.log('✅ Fallback system found recommendations:', recommendations.length);
+                } else {
+                  console.log('❌ Fallback system also found no recommendations');
+                }
+              } catch (fallbackError) {
+                console.error('❌ Fallback system error:', fallbackError);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching recommendations:', error);
+        }
+      } else if (aiResponse.shouldShowRecommendations) {
+        shouldShowRecommendations = true;
+      }
+
+      // No message truncation - activity cards now appear in side panel
+
+      res.json({
+        recommendations: recommendations || [],
+        shouldShowRecommendations,
+        sessionId: conversation.sessionId,
+        destination: updatedPreferences?.destination || null,
+        searchQuery: updatedPreferences?.lastSearchQuery || null,
+      });
+    } catch (error) {
+      console.error('Error processing recommendations:', error);
+      res.status(500).json({ error: 'Failed to process recommendations' });
+    }
+  });
+
+  // Send message and get AI response
+  app.post("/api/conversation/message", async (req, res) => {
+    try {
+      const { message, sessionId, explicitDestination } = sendMessageSchema.parse(req.body);
+
+      let conversation = await storage.getConversation(sessionId || '');
+      if (!conversation) {
+        // Create new conversation if not found
+        const newSessionId = nanoid();
+        conversation = await storage.createConversation({
+          sessionId: newSessionId,
+          messages: [],
+          travelPreferences: null,
+          lastRecommendations: null,
+        });
+      }
+
+      // Add user message
+      const userMessage = {
+        id: nanoid(),
+        text: message,
+        sender: 'user' as const,
+        timestamp: new Date().toISOString(),
+      };
+
+      const messages = [...(conversation.messages as any[] || []), userMessage];
+
+      // Process with AI
+      let aiResponse;
+      try {
+        aiResponse = await anthropicService.processConversation({
+          messages: messages,
+          preferences: conversation.travelPreferences as any,
+        }, message);
+      } catch (anthropicError) {
+        console.log('🔄 Anthropic API error in recommendations, providing fallback activities');
+
+        // Extract destination from message
+        const destination = extractDestinationFromContext(message);
+
+        if (destination) {
+          console.log('🔍 Searching Viator directly for:', destination);
+
+          // Search Viator directly for museum activities
+          const viatorResponse = await viatorService.searchProducts({
+            destination: destination,
+            query: 'museums cultural attractions',
+            topX: 8,
+            catIds: []
+          });
+
+          console.log('✅ Direct Viator search returned:', viatorResponse.products?.length || 0, 'activities');
+
+          // Transform Viator products to WonderVoya format
+          const fallbackActivities = viatorResponse.products?.map(product => ({
+            id: product.productCode,
+            title: product.title,
+            description: product.shortDescription || product.description,
+            price: product.price?.amount || 0,
+            currency: product.price?.currency || 'USD',
+            duration: product.duration || 'Duration varies',
+            rating: product.rating || 4.5,
+            reviewCount: product.reviewCount || 0,
+            imageUrl: product.images?.[0]?.variants?.[0]?.url || '/placeholder-activity.jpg',
+            bookingUrl: product.bookingUrl || `https://www.viator.com/tours/${product.productCode}`,
+            productCode: product.productCode,
+            location: product.location || destination
+          })) || [];
+
+          return res.json({
+            recommendations: fallbackActivities,
+            shouldShowRecommendations: true,
+            message: 'Found activities through direct search'
+          });
+        }
+
+        // Ultimate fallback - return empty but indicate search should continue
+        return res.json({
+          recommendations: [],
+          shouldShowRecommendations: false,
+          message: 'AI service temporarily unavailable. Please try again in a moment.'
+        });
+      }
+
+      // Add AI response message (will be updated with truncation later if needed)
+      const aiMessage = {
+        id: nanoid(),
+        text: aiResponse.message,
+        sender: 'ai' as const,
+        timestamp: new Date().toISOString(),
+      };
+
+      const updatedMessages = [...messages, aiMessage];
+
+      // Merge preferences
+      let updatedPreferences = conversation.travelPreferences as any;
+      if (aiResponse.preferences) {
+        updatedPreferences = {
+          ...updatedPreferences,
+          ...aiResponse.preferences,
+        };
+      }
+
+      // If explicit destination provided from template form, use it directly
+      if (req.body.explicitDestination) {
+        updatedPreferences = {
+          ...updatedPreferences,
+          destination: req.body.explicitDestination,
+        };
+        console.log(`🎯 Using explicit destination from template: "${req.body.explicitDestination}"`);
+      }
+
+      // Get recommendations - show cards when we have enough context
+      let recommendations = null;
+      let shouldShowRecommendations = false;
+
+      // Check if message contains clear travel intent with destination
+      const hasDestination = /\b(in|to|visit|going|traveling|trip|vacation|holiday)\s+([A-Z][a-zA-Z\s,]+)/i.test(message) ||
+                            /\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+(trip|vacation|activities|tours|things to do)/i.test(message);
+
+      // Check if message is specific enough (has activity type or clear intent)
+      const hasActivityIntent = /\b(activities|tours|things to do|attractions|experiences|food|restaurant|museum|beach|hiking|adventure|cultural|nightlife|shopping|sightseeing|visit|see|explore|show me)/i.test(message);
+
+      // More aggressive triggering - show cards if we have basic travel context
+      const shouldSearchNow = hasDestination || hasActivityIntent || 
+                             (aiResponse.shouldShowRecommendations && aiResponse.searchQuery) ||
+                             message.toLowerCase().includes('museum') ||
+                             message.toLowerCase().includes('culture') ||
+                             (updatedPreferences?.destination && updatedMessages.length >= 3) ||
+                             message.toLowerCase().includes('tokyo') ||
+                             message.toLowerCase().includes('yes');
+
+      if (shouldSearchNow) {
+        try {
+          const currency = updatedPreferences?.budget?.currency || 'USD';
+
+          // Extract activity keywords using multiple methods for better accuracy
+          let searchQuery = aiResponse.searchQuery || extractActivityKeywords(message, updatedPreferences);
+
+          console.log(`🔍 Extracted activity keywords: "${searchQuery}" from message: "${message}"`);
+          console.log(`📋 Available preferences:`, JSON.stringify(updatedPreferences?.interests || [], null, 2));
+
+          // Clean up search query to focus on activities, not travel logistics
+          searchQuery = cleanSearchQuery(searchQuery);
+
+          console.log(`🔍 Using enhanced destination-aware search for: "${searchQuery}"`);
+
+          // Use enhanced search with proper destination resolution directly
+          try {
+            // Always use cached Viator destinations for consistency
+            const destinations = await enhancedViatorService.getDestinations();
+            console.log(`🗄️ Loaded ${destinations.length} destinations from cached Viator data`);
+
+            const { smartDestinationMatcher } = await import('./services/smart-destination-matcher');
+            smartDestinationMatcher.setDestinations(destinations);
+
+            // Enhanced destination extraction with template field priority
+            const extractedDestination = extractDestinationFromContext(message, updatedPreferences, req.body.explicitDestination);
+            let targetDestination = null;
+
+            if (extractedDestination) {
+              // Ensure destinations come from cached Viator data
+              const viatorDestinations = await enhancedViatorService.getDestinations();
+              console.log(`🗄️ Using ${viatorDestinations.length} cached Viator destinations for matching`);
+
+              targetDestination = smartDestinationMatcher.extractDestinationFromSearch(extractedDestination, viatorDestinations);
+              console.log(`📍 Destination resolution: "${extractedDestination}" → "${targetDestination?.name || 'no match found'}" (ID: ${targetDestination?.id || 'N/A'})`);
+
+              // Validate the destination ID exists in our cache
+              if (targetDestination) {
+                const validDestination = viatorDestinations.find(d => d.id === targetDestination.id || d.destinationId === targetDestination.id);
+                if (!validDestination) {
+                  console.log(`⚠️ Destination ID ${targetDestination.id} not found in cached data, clearing target`);
+                  targetDestination = null;
+                }
+              }
+            } else {
+              console.log(`❌ No destination context available for search`);
+            }
+
+            if (targetDestination) {
+              console.log(`🎯 TARGETING ACTIVITIES FOR: ${targetDestination.name} (ID: ${targetDestination.id})`);
+
+              // 🔒 CRITICAL FIX: Store destination context in updatedPreferences immediately
+              updatedPreferences = {
+                ...updatedPreferences,
+                destination: targetDestination.name,
+                destinationId: targetDestination.id
+              };
+              console.log(`🔒 PRESERVED destination context: ${targetDestination.name} (ID: ${targetDestination.id})`);
+
+              // Clear any contaminated cache before searching
+              viatorService.clearContaminatedCache();
+
+              // Enhanced search with strict destination filtering
+              let searchResults;
+              try {
+                // Step 1: Try to find matching tags for user interests
+                console.log(`🏷️ Attempting tag-based search for interests: "${searchQuery}" in ${targetDestination.name}`);
+                const tagResult = await tagManager.findMatchingTags(searchQuery);
+
+                if (tagResult.tagIds.length > 0 && tagResult.confidence > 50) {
+                  console.log(`✅ Found ${tagResult.tagIds.length} matching tags with ${tagResult.confidence}% confidence`);
+                  console.log(`🏷️ Matched tags: ${tagResult.matchedTags.map(t => t.tagName).join(', ')}`);
+
+                  // Use tag-based search as primary method with strict destination filtering
+                  const tagBasedActivities = await enhancedViatorService.searchActivitiesWithTags({
+                    destinationId: targetDestination.id,
+                    tagIds: tagResult.tagIds,
+                    currency,
+                    count: 10
+                  });
+
+                  if (tagBasedActivities.length > 0) {
+                    console.log(`✅ Tag-based search returned ${tagBasedActivities.length} activities for ${targetDestination.name}`);
+                    recommendations = tagBasedActivities;
+                  } else {
+                    console.log(`⚠️ Tag-based search returned no results, falling back to keyword search`);
+                    // Fallback to keyword-based search with strict destination enforcement
+                    searchResults = await enhancedViatorService.enhancedSearch({
+                      keywords: searchQuery,
+                      destination: targetDestination.name,
+                      destinationId: targetDestination.id,
+                      currency,
+                      maxResults: 10,
+                      enforceDestination: true
+                    });
+                    recommendations = searchResults.activities;
+                  }
+                } else {
+                  console.log(`⚠️ No suitable tags found (confidence: ${tagResult.confidence}%), using keyword search`);
+                  // Fallback to keyword-based search with strict destination enforcement
+                  searchResults = await enhancedViatorService.enhancedSearch({
+                    keywords: searchQuery,
+                    destination: targetDestination.name,
+                    destinationId: targetDestination.id,
+                    currency,
+                    maxResults: 10,
+                    enforceDestination: true
+                  });
+                  recommendations = searchResults.activities;
+                }
+              } catch (tagError) {
+                console.error('❌ Tag-based search failed, falling back to keywords:', tagError);
+                // Fallback to existing keyword-based search
+                searchResults = await enhancedViatorService.enhancedSearch({
+                  keywords: searchQuery,
+                  destination: targetDestination.name,
+                  currency,
+                  maxResults: 10
+                });
+                recommendations = searchResults.activities;
+              }
+
+            // If no results yet, use Ultimate Search Engine
+            if (!recommendations || recommendations.length === 0) {
+              // Use Ultimate Search Engine for all other categories
+              const generalRequest = {
+                query: searchQuery,
+                destinationId: targetDestination?.id, // Use validated destination ID
+                currency: currency || 'USD',
+                maxResults: 8,
+                userPreferences: {
+                  budget: extractBudgetPreferences(message, currency)?.max > 100 ? 'luxury' : 'mid',
+                  duration: extractDurationPreferences(message)?.max > 360 ? 'full_day' : 'medium',
+                  interests: [searchQuery]
+                }
+              };
+
+              if (!generalRequest.destinationId) {
+                console.log('⚠️ Cannot perform Ultimate Search without a valid destination ID.');
+              } else {
+                console.log(`🚀 ULTIMATE ENGINE REQUEST:`, generalRequest);
+                try {
+                  const generalResults = await ultimateViatorEngine.search(generalRequest);
+                  recommendations = generalResults.activities;
+                  console.log(`🚀 ULTIMATE ENGINE: Found ${recommendations.length} activities.`);
+                } catch (ultimateError) {
+                  console.error('❌ Ultimate Engine search failed:', ultimateError);
+                }
+              }
+            }
+
+
+            if (recommendations && recommendations.length > 0) {
+              console.log(`✅ Found ${recommendations.length} activities.`);
+            } else {
+              console.log('⚠️ No activities found through enhanced search, falling back to freetext.');
+              // Fallback to freetext search if no results
+              const searchResults = await enhancedViatorService.searchProducts(searchQuery, currency);
+              let filteredResults = searchResults.slice(0, 10);
+
+              // Apply destination filtering if we identified a target destination
+              if (targetDestination) {
+                const targetCity = targetDestination.name.toLowerCase().split(',')[0].trim();
+                filteredResults = filteredResults.filter(activity => {
+                  const location = activity.location.toLowerCase();
+                  return location.includes(targetCity);
+                });
+                console.log(`🔧 Filtered freetext results to ${filteredResults.length} for ${targetDestination.name}`);
+              }
+              recommendations = filteredResults;
+            }
+
+            shouldShowRecommendations = true;
+            console.log('✅ Found recommendations:', recommendations?.length || 0);
+          }
+        } catch (error) {
+          console.error('Error fetching recommendations:', error);
+        }
+      }
+      
+      // Note: aiResponse is not available in this endpoint scope
+      // shouldShowRecommendations is determined by the search logic above
+
+      // No message truncation - activity cards now appear in side panel
+
+      res.json({
+        recommendations: recommendations || [],
+        shouldShowRecommendations,
+        sessionId: conversation.sessionId,
+        destination: updatedPreferences?.destination || null,
+        searchQuery: updatedPreferences?.lastSearchQuery || null,
+      });
+    } catch (error) {
+      console.error('Error processing recommendations:', error);
+      res.status(500).json({ error: 'Failed to process recommendations' });
+    }
+  });
