@@ -100,22 +100,36 @@ function extractActivityKeywords(message: string, preferences: any): string {
 
   const activityTerms: string[] = [];
 
-  if (/museum|art|gallery|exhibition|culture|history/.test(msg)) {
+  // Word-boundary matching: the unbounded version of these regexes matched
+  // "art" inside "charters" and similar false positives, silently injecting
+  // "museum cultural art" into unrelated fishing/adventure queries and
+  // hijacking downstream theme detection.
+  if (/\b(museum|art|gallery|exhibition|culture|history)\b/.test(msg)) {
     activityTerms.push('museum', 'cultural', 'art');
   }
-  if (/food|restaurant|culinary|dining|eat|taste/.test(msg)) {
+  if (/\b(food|restaurant|culinary|dining|eat|taste)\b/.test(msg)) {
     activityTerms.push('food', 'culinary', 'dining');
   }
-  if (/adventure|outdoor|hiking|kayak|bike|climb/.test(msg)) {
+  if (/\b(adventure|outdoor|hiking|kayak|bike|climb)\b/.test(msg)) {
     activityTerms.push('adventure', 'outdoor');
   }
-  if (/beach|water|swim|surf|dive|snorkel/.test(msg)) {
+  if (/\b(beach|water|swim|surf|dive|snorkel)\b/.test(msg)) {
     activityTerms.push('beach', 'water sports');
   }
-  if (/fish|fishing|charter/.test(msg)) {
+  if (/\b(fish|fishing|charter)\b/.test(msg)) {
     activityTerms.push('fishing', 'charter', 'boat');
   }
-  if (/tour|sightseeing|visit|see|explore/.test(msg)) {
+  // These two categories were previously missing entirely, so a query like
+  // "royal palaces and castles" that also happened to match the generic
+  // tour/sightseeing bucket below had its actual subject silently dropped,
+  // leaving only "tours sightseeing" for theme detection to work with.
+  if (/\b(royal|castle|palace|king|queen|knight|medieval|throne|monarchy)\b/.test(msg)) {
+    activityTerms.push('royal', 'castle', 'palace', 'history');
+  }
+  if (/\b(ninja|samurai|martial arts|katana|dojo|shogun|bushido)\b/.test(msg)) {
+    activityTerms.push('ninja', 'samurai', 'cultural');
+  }
+  if (/\b(tour|sightseeing|visit|see|explore)\b/.test(msg)) {
     activityTerms.push('tours', 'sightseeing');
   }
 
@@ -526,13 +540,6 @@ User preferences: ${JSON.stringify(conversation.travelPreferences || {})}`
               relatedDestinationIds = relatedDestinationIds.slice(0, 3); // Limit non-primary cities too
             }
 
-            // Special handling for Hawaii fishing searches
-            if (multiDestinationMatcher.isHawaiiSearch(searchContent) &&
-                (cleanQuery.includes('fish') || cleanQuery.includes('charter'))) {
-              const hawaiiDestIds = multiDestinationMatcher.getHawaiiDestinationIds(cleanQuery);
-              console.log(`🎣 FISHING IN HAWAII: Priority IDs: ${hawaiiDestIds.slice(0, 3).join(', ')}`);
-              relatedDestinationIds.splice(0, 0, ...hawaiiDestIds.slice(0, 3));
-            }
 
             let allRecommendations: any[] = [];
             let searchSuccessful = false;

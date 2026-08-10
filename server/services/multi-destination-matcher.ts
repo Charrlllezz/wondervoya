@@ -28,12 +28,18 @@ export class MultiDestinationMatcher {
       primaryId: 278,
       keywords: ['hawaii', 'hawaiian', 'kona', 'kailua', 'maui', 'oahu', 'honolulu', 'waikiki', 'big island', 'kauai', 'molokai', 'lanai'],
       relatedIds: [
-        { id: 278, name: 'Hawaii', priority: 8, searchTerms: ['hawaii', 'hawaiian'] },
+        // Verified directly against the Viator API: the plain "Hawaii" ID
+        // (278) is what fishing-charter and other Hawaii-wide products are
+        // actually tagged under — a query against ID 59070 below returns
+        // zero fishing results despite its "Kailua-Kona" label, while 278
+        // returns real Kona-area charters. The IDs below it were guesses
+        // ("likely contain the missing fishing charters") that turned out
+        // to be wrong, so 278 now sorts first instead of last.
+        { id: 278, name: 'Hawaii', priority: 11, searchTerms: ['hawaii', 'hawaiian'] },
         { id: 669, name: 'Big Island', priority: 9, searchTerms: ['big island', 'hawaii big island'] },
         { id: 670, name: 'Maui', priority: 9, searchTerms: ['maui'] },
         { id: 671, name: 'Oahu', priority: 9, searchTerms: ['oahu', 'honolulu', 'waikiki'] },
         { id: 672, name: 'Kauai', priority: 9, searchTerms: ['kauai'] },
-        // Kona-specific destination IDs (these likely contain the missing fishing charters)
         { id: 59070, name: 'Kailua-Kona', priority: 10, searchTerms: ['kona', 'kailua-kona', 'kailua kona'] },
         { id: 999980, name: 'Kona Coast', priority: 10, searchTerms: ['kona coast', 'kona fishing'] },
         { id: 999981, name: 'West Hawaii', priority: 9, searchTerms: ['west hawaii'] },
@@ -230,35 +236,6 @@ export class MultiDestinationMatcher {
     );
   }
 
-  /**
-   * Get priority-ordered destination IDs specifically for Hawaii searches
-   * This ensures fishing charters in Kona are found
-   */
-  getHawaiiDestinationIds(searchTerm: string): number[] {
-    const normalizedSearch = searchTerm.toLowerCase();
-    const hawaiiGroup = this.getDestinationGroup('Hawaii');
-
-    if (!hawaiiGroup) {
-      return [278]; // Fallback to main Hawaii ID
-    }
-
-    // Special logic for fishing searches
-    if (normalizedSearch.includes('fish') || normalizedSearch.includes('charter')) {
-      console.log(`🎣 FISHING SEARCH DETECTED: Prioritizing Kona-specific destinations`);
-      return [
-        59070,   // Kailua-Kona (highest priority for fishing)
-        999980,  // Kona Coast
-        999984,  // South Kona  
-        999985,  // North Kona
-        999986,  // Captain Cook
-        669,     // Big Island
-        278      // Hawaii (general)
-      ];
-    }
-
-    // General Hawaii search - return all related IDs in priority order
-    return this.findDestinationIdsForLocation(searchTerm, 'Hawaii');
-  }
 }
 
 // Export singleton instance

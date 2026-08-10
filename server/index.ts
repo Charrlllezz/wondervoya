@@ -4,7 +4,6 @@ import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { setupUltimateSearchRoutes } from "./routes/ultimate-search";
 import { setupVite, serveStatic, log } from "./vite";
-import { tagManager } from "./services/tag-manager";
 import { csvTagManager } from "./services/csv-tag-manager";
 
 const app = express();

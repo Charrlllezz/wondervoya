@@ -33,30 +33,17 @@ class CSVTagManager {
   private searchIndex: Map<string, TaxonomyTag[]> = new Map();
   private initialized = false;
 
-  // Enhanced category mappings for better intent detection
-  private readonly CATEGORY_INTENT_MAP = {
-    'food_wine': [
-      'Food & Drink', 'Food Tours', 'Food & Drink Classes', 'Desserts & Sweets', 
-      'Coffee & Tea', 'Wine, Beer & Spirits', 'Dining Experiences', 'Restaurants',
-      'Cooking Classes', 'Wine Tastings', 'Brewery Tours', 'Culinary Tours'
-    ],
-    'outdoor_adventure': [
-      'Outdoor Activities', 'Extreme Sports', 'Winter Sports', 'Nature and Wildlife Tours',
-      'Motor Sports', 'Active & Outdoor Classes', 'Water Sports', 'Hiking', 'Adventure Tours'
-    ],
-    'cultural_arts': [
-      'Art & Culture', 'Shows & Performances', 'Arts & Design', 'Museums',
-      'Cultural Tours', 'Historical Tours', 'Art Galleries', 'Theater Shows'
-    ],
-    'tours_sightseeing': [
-      'Tours, Sightseeing & Cruises', 'Sightseeing Tours', 'City Tours', 
-      'Boat Tours', 'Air Tours', 'Walking Tours', 'Private Sightseeing Tours'
-    ],
-    'attractions_entertainment': [
-      'Tickets & Passes', 'Attractions & Museums', 'Amusement Parks', 'Theme Parks',
-      'Shows', 'Entertainment', 'Water Parks', 'Zoos'
-    ]
-  };
+  // Generic/conversational words that pass the length>2 filter but carry no
+  // category signal. Left unfiltered, a query like "spa day" matches "day"
+  // against every "X-day Tour" and calendar-holiday tag ("Boxing Day",
+  // "Australia Day", "Day of the Dead") via the partial-match fallback
+  // below, drowning out the actual "Spas"/"Spa Services" match.
+  private readonly STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'want', 'need', 'like', 'get', 'day', 'days',
+    'trip', 'travel', 'find', 'looking', 'plan', 'planning', 'visit', 'see',
+    'explore', 'this', 'that', 'have', 'about', 'some', 'any', 'week', 'weeks',
+    'would', 'could', 'please', 'really', 'also', 'just', 'lets', "let's"
+  ]);
 
   // Enhanced semantic keyword expansion with hierarchical awareness
   private readonly SEMANTIC_EXPANSIONS: { [key: string]: string[] } = {
@@ -113,7 +100,7 @@ class CSVTagManager {
     try {
       console.log('🏷️ Initializing CSV-based tag manager...');
       
-      const csvPath = path.join(process.cwd(), 'attached_assets', 'Viator Tag Taxonomy Tree_1755536808893.csv');
+      const csvPath = path.join(process.cwd(), 'server', 'data', 'viator-tag-taxonomy.csv');
       
       if (!fs.existsSync(csvPath)) {
         throw new Error(`CSV file not found at ${csvPath}`);
@@ -245,11 +232,25 @@ class CSVTagManager {
     }
     
     // Add words from the tag name
-    const words = tagName.toLowerCase().split(/[\s&\-,]+/).filter(word => 
+    const words = tagName.toLowerCase().split(/[\s&\-,]+/).filter(word =>
       word.length > 2 && !['and', 'the', 'for', 'with', 'tours', 'tour', 'tickets', 'ticket'].includes(word)
     );
     words.forEach(word => terms.add(word));
-    
+
+    // Also index words from the tag's direct parent category, so a leaf
+    // tag like "Onsens" (parent: "Traditional Wellness") is findable via
+    // "wellness", not only the literal word "onsens". Only the immediate
+    // parent is used, not the whole ancestor chain — pulling in the L1
+    // category too (e.g. "Art & Culture") would inject "art"/"culture"
+    // into every tag under that branch regardless of relevance.
+    const parentName = fullPath.length >= 2 ? fullPath[fullPath.length - 2] : null;
+    if (parentName) {
+      const parentWords = parentName.toLowerCase().split(/[\s&\-,]+/).filter(word =>
+        word.length > 2 && !['and', 'the', 'for', 'with', 'tours', 'tour', 'tickets', 'ticket'].includes(word)
+      );
+      parentWords.forEach(word => terms.add(word));
+    }
+
     // Add semantic expansions
     words.forEach(word => {
       const expansions = this.SEMANTIC_EXPANSIONS[word];
@@ -368,7 +369,7 @@ class CSVTagManager {
       .map(term => term.trim())
       .filter(term => term.length > 2)
       .map(term => term.replace(/[^\w\s]/g, ''))
-      .filter(term => term.length > 0);
+      .filter(term => term.length > 0 && !this.STOPWORDS.has(term));
     
     // Add semantic expansions
     const expandedTerms = new Set(terms);
@@ -417,22 +418,27 @@ class CSVTagManager {
     ).length;
     score += matchingTerms * 50;
     
-    // 5. CATEGORY INTENT ALIGNMENT
-    const categoryBonus = this.getCategoryRelevance(tag.category, allTerms);
-    score += categoryBonus * 100;
-    
-    // 6. LEVEL-BASED SPECIFICITY SCORING (L3/L4 ONLY - heavily favor specific tags)
+    // LEVEL-BASED SPECIFICITY SCORING (L3/L4 ONLY - heavily favor specific tags)
     const levelMultiplier = {
       'L1': 0.1,  // Strongly discourage general categories
-      'L2': 0.3,  // Discourage subcategories  
+      'L2': 0.3,  // Discourage subcategories
       'L3': 2.0,  // Strongly favor specific activities
       'L4': 2.5   // Most specific get highest priority
     };
     score *= levelMultiplier[tag.level];
-    
-    // 7. FREQUENCY & POPULARITY BOOST
-    score *= this.getPopularityMultiplier(tag);
-    
+
+    // Deliberately no "category intent" or "popularity" bonus here anymore.
+    // Both used to add a flat bonus for a hand-picked list of five "intent"
+    // categories (food/outdoor/cultural/tours/attractions) and for a
+    // hardcoded list of "popular" tag names — categories outside those
+    // lists (Shopping, Wellness, Nightlife, ...) got no bonus at all, so a
+    // literal exact-word match like "Shopping Tours" for a "shopping"
+    // query was consistently outranked by generic-but-"popular" tags like
+    // "Walking Tours" that only matched on filler words. Scoring is now
+    // driven entirely by actual match quality against the real taxonomy
+    // text/structure (exact match, semantic relevance, hierarchy, level
+    // specificity) rather than a subjective, incomplete category allowlist.
+
     return Math.round(score);
   }
   
@@ -511,69 +517,6 @@ class CSVTagManager {
            expansions1.some((exp: string) => expansions2.includes(exp));
   }
   
-  /**
-   * Get popularity multiplier based on tag characteristics
-   */
-  private getPopularityMultiplier(tag: TaxonomyTag): number {
-    // Common popular activity types get slight boost
-    const popularCategories = [
-      'Tours, Sightseeing & Cruises', 'Food & Drink', 'Art & Culture',
-      'Outdoor Activities', 'Shows & Performances'
-    ];
-    
-    const popularTags = [
-      'walking tours', 'food tours', 'museums', 'boat tours', 'city tours',
-      'cooking classes', 'wine tasting', 'cultural tours', 'historical tours'
-    ];
-    
-    let multiplier = 1.0;
-    
-    if (popularCategories.includes(tag.category)) {
-      multiplier += 0.1;
-    }
-    
-    const tagNameLower = tag.tagName.toLowerCase();
-    if (popularTags.some(popular => tagNameLower.includes(popular))) {
-      multiplier += 0.15;
-    }
-    
-    return multiplier;
-  }
-
-  /**
-   * Get category relevance based on search terms
-   */
-  private getCategoryRelevance(category: string, searchTerms: string[]): number {
-    for (const [intent, categories] of Object.entries(this.CATEGORY_INTENT_MAP)) {
-      if (categories.some(cat => category.includes(cat))) {
-        const relevantTerms = this.getIntentTerms(intent);
-        const matches = searchTerms.filter(term => 
-          relevantTerms.some(relevantTerm => 
-            term.includes(relevantTerm) || relevantTerm.includes(term)
-          )
-        );
-        if (matches.length > 0) {
-          return matches.length / searchTerms.length;
-        }
-      }
-    }
-    return 0;
-  }
-
-  /**
-   * Get terms associated with an intent category
-   */
-  private getIntentTerms(intent: string): string[] {
-    const intentTerms = {
-      'food_wine': ['food', 'wine', 'culinary', 'dining', 'restaurant', 'cooking', 'chef', 'tasting'],
-      'outdoor_adventure': ['outdoor', 'adventure', 'hiking', 'climbing', 'extreme', 'sport', 'nature'],
-      'cultural_arts': ['culture', 'art', 'museum', 'gallery', 'historical', 'heritage', 'show', 'performance'],
-      'tours_sightseeing': ['tour', 'sightseeing', 'guided', 'excursion', 'visit', 'explore'],
-      'attractions_entertainment': ['attraction', 'theme', 'park', 'entertainment', 'ticket', 'show']
-    };
-    return intentTerms[intent as keyof typeof intentTerms] || [];
-  }
-
   /**
    * Calculate overall confidence score
    */
