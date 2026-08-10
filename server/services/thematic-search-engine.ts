@@ -13,6 +13,28 @@ import { viatorService } from './viator';
 import { csvTagManager } from './csv-tag-manager';
 import type { ActivityRecommendation } from '@shared/schema';
 
+/**
+ * Word-boundary-aware substring check. Plain `.includes()` false-positives on
+ * short keywords like "art" or "mall" matching inside unrelated words such as
+ * "start"/"participant" or "small" — this avoids that.
+ */
+function containsWord(content: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(content);
+}
+
+// Theme names that have a bespoke pass/fail filter in passesThemeSpecificFiltering
+// (everything except the generic fallback used for undetected/unknown themes).
+const THEMES_WITH_DEDICATED_FILTERING = new Set([
+  'Food & Culinary Tours',
+  'Museums & Arts',
+  'Ninja & Samurai Experiences',
+  'Fishing Activities',
+  'Royal History & Knights',
+  'Water Activities',
+  'Cultural Heritage',
+]);
+
 interface ThematicSearchResult {
   products: any[];
   strategy: string;
@@ -807,27 +829,39 @@ export class ThematicSearchEngine {
       // Check for theme keyword matches
       let thematicScore = 0;
       for (const keyword of theme.keywords) {
-        if (content.includes(keyword)) {
+        if (containsWord(content, keyword)) {
           thematicScore += 10;
         }
       }
 
       // Penalize for exclude keywords
       for (const excludeKeyword of theme.excludeKeywords) {
-        if (content.includes(excludeKeyword)) {
+        if (containsWord(content, excludeKeyword)) {
           thematicScore -= 20; // Increased penalty for better filtering
         }
       }
 
       // Bonus for destination relevance
-      if (content.includes(destinationName.toLowerCase())) {
+      if (containsWord(content, destinationName.toLowerCase())) {
         thematicScore += 5;
       }
 
       product._finalThematicScore = thematicScore;
-      
-      // More strict threshold for food tours
-      const threshold = theme.name === 'Food & Culinary Tours' ? 5 : -10;
+
+      // Named themes (everything except the generic fallback) already ran a
+      // dedicated, theme-specific pass/fail check above via
+      // passesThemeSpecificFiltering — e.g. filterFoodTours() already decided
+      // this is a genuine food tour. Re-vetoing that verdict here based on a
+      // generic keyword score (which penalizes incidental mentions like a
+      // food tour's description name-dropping a "monument" it walks past)
+      // double-guesses a more precise decision that was already made. Keep
+      // the score for sort ordering, but only use it as a hard filter for
+      // themes that fell through to the generic filter.
+      if (THEMES_WITH_DEDICATED_FILTERING.has(theme.name)) {
+        return true;
+      }
+
+      const threshold = -10;
       return thematicScore > threshold;
     });
 
@@ -976,10 +1010,24 @@ export class ThematicSearchEngine {
       'go-kart', 'karting', 'robot', 'technology', 'anime', 'manga'
     ];
 
+    // PRIMARY FOOD REQUIREMENTS: Must have strong food focus
+    const primaryFoodTerms = [
+      'food tour', 'culinary tour', 'cooking class', 'baking class', 'food experience', 'culinary experience',
+      'food market', 'street food', 'restaurant tour', 'dining experience', 'chef experience',
+      'sushi class', 'ramen tour', 'sake tasting', 'wine tasting', 'brewery tour',
+      'food tasting', 'culinary class', 'kitchen', 'cooking', 'baking', 'local cuisine',
+      'dinner cruise', 'lunch cruise', 'gourmet dinner', 'gourmet lunch', '3 course', 'tasting menu',
+      'food & wine tour', 'food and wine tour', 'wine & food tour', 'wine and food tour',
+      'gastronomy tour', 'foodie tour', 'tapas tour', 'food walking tour'
+    ];
+
     for (const exclusion of strictExclusions) {
-      if (content.includes(exclusion)) {
-        // Exception: Allow ONLY if explicitly labeled as food tour/cooking class
-        const hasExplicitFoodActivity = ['food tour', 'culinary tour', 'cooking class', 'cooking experience', 'chef class'].some(term => content.includes(term));
+      if (containsWord(content, exclusion)) {
+        // Exception: Allow ONLY if explicitly labeled as a food tour/cooking class.
+        // Real listings often phrase this as "food & wine tour" / "food and wine
+        // tour" rather than the literal phrase "food tour", so reuse the broader
+        // primaryFoodTerms list here instead of a narrower duplicate.
+        const hasExplicitFoodActivity = primaryFoodTerms.some(term => containsWord(content, term));
         if (!hasExplicitFoodActivity) {
           console.log(`❌ FOOD FILTER: Excluding "${title}" (contains: ${exclusion})`);
           return false;
@@ -987,17 +1035,8 @@ export class ThematicSearchEngine {
       }
     }
 
-    // PRIMARY FOOD REQUIREMENTS: Must have strong food focus
-    const primaryFoodTerms = [
-      'food tour', 'culinary tour', 'cooking class', 'baking class', 'food experience', 'culinary experience',
-      'food market', 'street food', 'restaurant tour', 'dining experience', 'chef experience',
-      'sushi class', 'ramen tour', 'sake tasting', 'wine tasting', 'brewery tour',
-      'food tasting', 'culinary class', 'kitchen', 'cooking', 'baking', 'local cuisine',
-      'dinner cruise', 'lunch cruise', 'gourmet dinner', 'gourmet lunch', '3 course', 'tasting menu'
-    ];
+    const hasPrimaryFoodFocus = primaryFoodTerms.some(term => containsWord(content, term));
 
-    const hasPrimaryFoodFocus = primaryFoodTerms.some(term => content.includes(term));
-    
     if (hasPrimaryFoodFocus) {
       console.log(`✅ FOOD FILTER: Accepting "${title}" (primary food activity detected)`);
       return true;
@@ -1005,10 +1044,10 @@ export class ThematicSearchEngine {
 
     // SECONDARY CHECK: Allow with lower threshold for food indicators
     const secondaryFoodTerms = ['restaurant', 'dining', 'sushi', 'ramen', 'meal', 'dishes', 'chef', 'traditional food', 'bistro', 'cafe', 'cuisine', 'wine', 'tasting'];
-    const secondaryMatches = secondaryFoodTerms.filter(term => content.includes(term));
-    
+    const secondaryMatches = secondaryFoodTerms.filter(term => containsWord(content, term));
+
     // More specific entertainment exclusions - don't exclude dinner shows/cruises
-    const isEntertainment = ['wrestling', 'theater', 'concert', 'comedy show', 'cabaret show'].some(term => content.includes(term));
+    const isEntertainment = ['wrestling', 'theater', 'concert', 'comedy show', 'cabaret show'].some(term => containsWord(content, term));
     
     // Accept if single strong food indicator or multiple weak ones
     if ((secondaryMatches.length >= 1 && !isEntertainment) || secondaryMatches.length >= 2) {
