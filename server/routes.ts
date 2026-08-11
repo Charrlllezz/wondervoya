@@ -390,9 +390,23 @@ User preferences: ${JSON.stringify(conversation.travelPreferences || {})}`
         tags: []
       };
 
-      // Attempt to parse destination from message text
-      const potentialDestinationMatch = messageText.match(/\b(?:in|to|visit|going|traveling)\s+([A-Z][a-zA-Z\s,]+)/i) ||
-                                        messageText.match(/\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+(?:trip|vacation|activities|tours)/i);
+      // Attempt to parse destination from message text. The connector word
+      // ("going", "to", ...) is matched case-insensitively since it can
+      // appear anywhere in a sentence, but the destination name itself is
+      // matched case-SENSITIVELY (requires an actual capital letter) —
+      // applying /i to the whole regex used to let the case-insensitive
+      // [A-Z] swallow a second lowercase connector word too (e.g. "going
+      // to Paris" → the capture greedily matched "to Paris" instead of
+      // stopping at "Paris", so it never matched any real destination
+      // name and this whole ambiguity check silently never ran).
+      // Matches a run of one-or-more connector words (not just the first),
+      // since natural phrasing often chains two of them — "going to Paris"
+      // is "going" + "to" back to back — and stopping after only the first
+      // would leave the second connector word attached to the capture below.
+      const connectorMatch = messageText.match(/\b(?:in|to|visit|going|traveling)\b(?:\s+\b(?:in|to|visit|going|traveling)\b)*/i);
+      const afterConnector = connectorMatch ? messageText.slice(connectorMatch.index! + connectorMatch[0].length) : '';
+      const potentialDestinationMatch = afterConnector.match(/^\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)/) ||
+                                        messageText.match(/\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+(?:trip|vacation|activities|tours)/);
 
       if (potentialDestinationMatch && potentialDestinationMatch[1]) {
         const matchedName = potentialDestinationMatch[1].trim();
