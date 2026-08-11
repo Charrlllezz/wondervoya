@@ -407,11 +407,22 @@ User preferences: ${JSON.stringify(conversation.travelPreferences || {})}`
         parsedIntent.destination.id = updatedPreferences.destination.id;
       }
 
-      // Check for specific activity keywords to determine if the query is ambiguous
-      const specificActivityKeywords = ['museum', 'art', 'gallery', 'exhibition', 'culture', 'history', 'food', 'restaurant', 'culinary', 'dining', 'eat', 'taste', 'adventure', 'outdoor', 'hiking', 'kayak', 'bike', 'climb', 'beach', 'water', 'swim', 'surf', 'dive', 'snorkel', 'fish', 'fishing', 'charter', 'tour', 'sightseeing', 'visit', 'see', 'explore'];
-      const hasSpecificActivity = specificActivityKeywords.some(keyword => messageText.toLowerCase().includes(keyword));
+      // Determine whether the query is specific enough to search directly,
+      // or just a bare destination mention ("I'm going to Paris") that
+      // needs a clarifying question. This used to be a hardcoded list of
+      // ~30 activity words — the same failure mode as extractActivityKeywords
+      // above: a query about something real but unlisted (spa, wellness,
+      // shopping, ninja/samurai, ...) was treated as ambiguous and never
+      // reached search at all. Reuse the same Claude-backed taxonomy match
+      // search will use anyway: if it resolves to real Viator tags, the
+      // query is specific; if nothing in the taxonomy matches, it
+      // genuinely is just a bare destination mention.
+      const needsAmbiguityCheck = parsedIntent.destination.id !== null && (hasDestination || hasGenericActivityWords);
+      const hasSpecificActivity = needsAmbiguityCheck
+        ? (await csvTagManager.findMatchingTags(messageText)).tagIds.length > 0
+        : false;
 
-      const isAmbiguousQuery = parsedIntent.destination.id !== null && !hasSpecificActivity && (hasDestination || hasGenericActivityWords);
+      const isAmbiguousQuery = needsAmbiguityCheck && !hasSpecificActivity;
 
       // 🎯 CLARIFICATION DIALOGUE LOGIC
       // If query is ambiguous, generate clarification options instead of calling searchV2

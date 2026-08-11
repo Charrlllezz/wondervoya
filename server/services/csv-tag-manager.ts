@@ -359,6 +359,7 @@ Instructions:
 - Prefer more specific (deeper path) categories over broad ones when they fit the query well, but include a broader category if no specific one matches.
 - Order tag IDs from most to least relevant. Return at most 10.
 - If nothing in the taxonomy is genuinely relevant, return an empty array.
+- If the query only states a destination or trip with no expressed interest, activity, or theme at all (e.g. "I'm going to Paris", "planning a trip to Hawaii", "what's there to do in Tokyo?"), also return an empty array — a bare "City Tours" or "Day Trips" match is not a real signal of what the traveler wants, and guessing one would skip a clarifying question they should be asked instead.
 
 Respond with ONLY a JSON object in this exact format, no other text, no markdown code fences:
 {"tagIds": [123, 456, 789]}`,
