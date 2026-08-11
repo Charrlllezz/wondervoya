@@ -22,6 +22,17 @@ export interface DestinationGroup {
 }
 
 export class MultiDestinationMatcher {
+  // Every ID below was checked directly against Viator's live /destinations
+  // API. The previous version of this list included ~20 entirely fabricated
+  // "sub-region" IDs (e.g. 999901-999987) that don't exist in Viator's
+  // system at all, plus several IDs that exist but point to a completely
+  // different real place than their label claimed — most seriously, Tokyo's
+  // secondary ID (295) actually resolved to Tennessee, and Paris's
+  // secondary IDs (684, 10) resolved to Las Vegas and Namibia. Those are
+  // all removed here rather than corrected, since a single verified ID per
+  // city is enough — the previous "related IDs" were an attempt to cover
+  // sub-regions that, per Hawaii's fishing-charter case, weren't even
+  // necessary (Viator's plain city-level ID already covers its sub-areas).
   private destinationGroups: DestinationGroup[] = [
     {
       location: 'Hawaii',
@@ -30,38 +41,25 @@ export class MultiDestinationMatcher {
       relatedIds: [
         // Verified directly against the Viator API: the plain "Hawaii" ID
         // (278) is what fishing-charter and other Hawaii-wide products are
-        // actually tagged under — a query against ID 59070 below returns
-        // zero fishing results despite its "Kailua-Kona" label, while 278
-        // returns real Kona-area charters. The IDs below it were guesses
-        // ("likely contain the missing fishing charters") that turned out
-        // to be wrong, so 278 now sorts first instead of last.
+        // actually tagged under, so it's searched first. The individual
+        // islands are real, verified IDs (the previous version had Maui/
+        // Oahu/Kauai's names rotated onto the wrong IDs). There's no
+        // standalone "Kona" destination in Viator's data — Kona is part of
+        // the Big Island, so kona-related search terms route there.
         { id: 278, name: 'Hawaii', priority: 11, searchTerms: ['hawaii', 'hawaiian'] },
-        { id: 669, name: 'Big Island', priority: 9, searchTerms: ['big island', 'hawaii big island'] },
-        { id: 670, name: 'Maui', priority: 9, searchTerms: ['maui'] },
-        { id: 671, name: 'Oahu', priority: 9, searchTerms: ['oahu', 'honolulu', 'waikiki'] },
-        { id: 672, name: 'Kauai', priority: 9, searchTerms: ['kauai'] },
-        { id: 59070, name: 'Kailua-Kona', priority: 10, searchTerms: ['kona', 'kailua-kona', 'kailua kona'] },
-        { id: 999980, name: 'Kona Coast', priority: 10, searchTerms: ['kona coast', 'kona fishing'] },
-        { id: 999981, name: 'West Hawaii', priority: 9, searchTerms: ['west hawaii'] },
-        { id: 999982, name: 'Kohala Coast', priority: 8, searchTerms: ['kohala'] },
-        { id: 999983, name: 'Hawaii County', priority: 7, searchTerms: ['hawaii county'] },
-        { id: 999984, name: 'South Kona', priority: 9, searchTerms: ['south kona'] },
-        { id: 999985, name: 'North Kona', priority: 9, searchTerms: ['north kona'] },
-        { id: 999986, name: 'Captain Cook', priority: 8, searchTerms: ['captain cook hawaii'] },
-        { id: 999987, name: 'Keauhou', priority: 8, searchTerms: ['keauhou'] }
+        { id: 669, name: 'Big Island of Hawaii', priority: 9, searchTerms: ['big island', 'kona', 'kailua', 'kailua-kona', 'kailua kona'] },
+        { id: 671, name: 'Maui', priority: 9, searchTerms: ['maui'] },
+        { id: 672, name: 'Oahu', priority: 9, searchTerms: ['oahu', 'waikiki'] },
+        { id: 670, name: 'Kauai', priority: 9, searchTerms: ['kauai'] },
+        { id: 59070, name: 'Honolulu', priority: 9, searchTerms: ['honolulu'] },
       ]
     },
     {
       location: 'Berlin',
       primaryId: 488,
-      keywords: ['berlin', 'germany', 'german', 'brandenburg', 'prussia', 'east berlin', 'west berlin'],
+      keywords: ['berlin', 'germany', 'german', 'brandenburg', 'prussia'],
       relatedIds: [
         { id: 488, name: 'Berlin', priority: 10, searchTerms: ['berlin', 'germany', 'german'] },
-        { id: 176, name: 'Berlin, Germany', priority: 10, searchTerms: ['berlin germany'] },
-        { id: 999901, name: 'East Berlin', priority: 8, searchTerms: ['east berlin'] },
-        { id: 999902, name: 'West Berlin', priority: 8, searchTerms: ['west berlin'] },
-        { id: 999903, name: 'Brandenburg', priority: 7, searchTerms: ['brandenburg'] },
-        { id: 999904, name: 'Greater Berlin', priority: 8, searchTerms: ['greater berlin'] }
       ]
     },
     {
@@ -70,10 +68,6 @@ export class MultiDestinationMatcher {
       keywords: ['paris', 'france', 'french', 'ile-de-france', 'louvre', 'eiffel', 'seine'],
       relatedIds: [
         { id: 479, name: 'Paris', priority: 10, searchTerms: ['paris', 'france', 'french'] },
-        { id: 684, name: 'Paris, France', priority: 10, searchTerms: ['paris france'] },
-        { id: 10, name: 'Paris Region', priority: 9, searchTerms: ['paris region', 'ile-de-france'] },
-        { id: 999910, name: 'Central Paris', priority: 9, searchTerms: ['central paris'] },
-        { id: 999911, name: 'Greater Paris', priority: 8, searchTerms: ['greater paris'] }
       ]
     },
     {
@@ -82,68 +76,38 @@ export class MultiDestinationMatcher {
       keywords: ['london', 'england', 'uk', 'united kingdom', 'british', 'thames', 'westminster'],
       relatedIds: [
         { id: 737, name: 'London', priority: 10, searchTerms: ['london', 'england', 'uk', 'united kingdom'] },
-        { id: 706, name: 'London, UK', priority: 10, searchTerms: ['london uk'] },
-        { id: 999920, name: 'Central London', priority: 9, searchTerms: ['central london'] },
-        { id: 999921, name: 'Greater London', priority: 8, searchTerms: ['greater london'] },
-        { id: 999922, name: 'City of London', priority: 9, searchTerms: ['city of london'] }
       ]
     },
     {
       location: 'Barcelona',
-      primaryId: 156,
+      primaryId: 562,
       keywords: ['barcelona', 'spain', 'spanish', 'catalonia', 'catalunya', 'catalan'],
       relatedIds: [
-        { id: 156, name: 'Barcelona', priority: 10, searchTerms: ['barcelona', 'spain', 'spanish'] },
-        { id: 157, name: 'Barcelona, Spain', priority: 10, searchTerms: ['barcelona spain'] },
-        { id: 999930, name: 'Barcelona Metropolitan', priority: 8, searchTerms: ['barcelona metropolitan'] },
-        { id: 999931, name: 'Catalonia', priority: 7, searchTerms: ['catalonia', 'catalunya'] }
+        { id: 562, name: 'Barcelona', priority: 10, searchTerms: ['barcelona', 'spain', 'spanish'] },
       ]
     },
     {
       location: 'Tokyo',
-      primaryId: 294,
+      primaryId: 334,
       keywords: ['tokyo', 'japan', 'japanese', 'edo', 'kanto', 'shibuya', 'shinjuku'],
       relatedIds: [
-        { id: 294, name: 'Tokyo', priority: 10, searchTerms: ['tokyo', 'japan', 'japanese'] },
-        { id: 295, name: 'Tokyo, Japan', priority: 10, searchTerms: ['tokyo japan'] },
-        { id: 999940, name: 'Tokyo Metropolitan', priority: 9, searchTerms: ['tokyo metropolitan'] },
-        { id: 999941, name: 'Greater Tokyo', priority: 8, searchTerms: ['greater tokyo'] },
-        { id: 999942, name: 'Tokyo Prefecture', priority: 9, searchTerms: ['tokyo prefecture'] }
+        { id: 334, name: 'Tokyo', priority: 10, searchTerms: ['tokyo', 'japan', 'japanese'] },
       ]
     },
     {
-      location: 'Paris',
-      primaryId: 479,
-      keywords: ['paris', 'france', 'french', 'ile-de-france', 'louvre', 'eiffel', 'seine'],
+      location: 'Rome',
+      primaryId: 511,
+      keywords: ['rome', 'italy', 'italian', 'roma', 'vatican', 'colosseum'],
       relatedIds: [
-        { id: 479, name: 'Paris', priority: 10, searchTerms: ['paris', 'france', 'french'] },
-        { id: 684, name: 'Paris, France', priority: 10, searchTerms: ['paris france'] },
-        { id: 10, name: 'Paris Region', priority: 9, searchTerms: ['paris region', 'ile-de-france'] },
-        { id: 999910, name: 'Central Paris', priority: 9, searchTerms: ['central paris'] },
-        { id: 999911, name: 'Greater Paris', priority: 8, searchTerms: ['greater paris'] }
+        { id: 511, name: 'Rome', priority: 10, searchTerms: ['rome', 'italy', 'italian'] },
       ]
     },
     {
-      location: 'London',
-      primaryId: 737,
-      keywords: ['london', 'england', 'uk', 'united kingdom', 'british', 'thames', 'westminster'],
+      location: 'New York',
+      primaryId: 687,
+      keywords: ['new york', 'nyc', 'manhattan', 'brooklyn'],
       relatedIds: [
-        { id: 737, name: 'London', priority: 10, searchTerms: ['london', 'england', 'uk', 'united kingdom'] },
-        { id: 706, name: 'London, UK', priority: 10, searchTerms: ['london uk'] },
-        { id: 999920, name: 'Central London', priority: 9, searchTerms: ['central london'] },
-        { id: 999921, name: 'Greater London', priority: 8, searchTerms: ['greater london'] },
-        { id: 999922, name: 'City of London', priority: 9, searchTerms: ['city of london'] }
-      ]
-    },
-    {
-      location: 'Barcelona',
-      primaryId: 156,
-      keywords: ['barcelona', 'spain', 'spanish', 'catalonia', 'catalunya', 'catalan'],
-      relatedIds: [
-        { id: 156, name: 'Barcelona', priority: 10, searchTerms: ['barcelona', 'spain', 'spanish'] },
-        { id: 157, name: 'Barcelona, Spain', priority: 10, searchTerms: ['barcelona spain'] },
-        { id: 999930, name: 'Barcelona Metropolitan', priority: 8, searchTerms: ['barcelona metropolitan'] },
-        { id: 999931, name: 'Catalonia', priority: 7, searchTerms: ['catalonia', 'catalunya'] }
+        { id: 687, name: 'New York City', priority: 10, searchTerms: ['new york', 'nyc', 'new york city'] },
       ]
     },
     {

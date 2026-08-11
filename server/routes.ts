@@ -164,25 +164,32 @@ function extractDestinationFromContext(message: string, preferences: any, fallba
   return null;
 }
 
-// Hardcoded destinations for quick search and autocomplete
+// Hardcoded destinations for quick search and autocomplete. Every ID here
+// was checked directly against Viator's live /destinations API — the
+// previous version had several IDs that exist but point to a completely
+// different real place: "Tokyo" (294) actually resolved to South Carolina,
+// "Tokyo, Japan" (295) to Tennessee, "Paris, France" (680) to Malmö, Sweden,
+// and several more were entirely fabricated (156/157 "Barcelona" and 290/291
+// "Kona" don't exist in Viator's system at all). Since this list feeds the
+// conversational-clarification destination lookup (not just search), a
+// wrong-but-real ID here silently generated clarification suggestions from
+// the wrong city's product catalog — e.g. a "Tokyo" conversation could get
+// seeded with South Carolina activity suggestions.
 const HARDCODED_DESTINATIONS = [
   { id: 278, name: "Hawaii", country: "USA" },
-  { id: 999980, name: "Hawaii, USA", country: "USA" },
-  { id: 999981, name: "Honolulu, Hawaii", country: "USA" },
+  { id: 59070, name: "Honolulu", country: "Hawaii, USA" },
   { id: 479, name: "Paris", country: "France" },
-  { id: 680, name: "Paris, France", country: "France" },
-  { id: 294, name: "Tokyo", country: "Japan" },
-  { id: 295, name: "Tokyo, Japan", country: "Japan" },
-  { id: 186, name: "London", country: "England" },
-  { id: 187, name: "London, England", country: "England" },
-  { id: 425, name: "Rome", country: "Italy" },
-  { id: 426, name: "Rome, Italy", country: "Italy" },
-  { id: 303, name: "New York", country: "USA" },
-  { id: 304, name: "New York, USA", country: "USA" },
-  { id: 156, name: "Barcelona", country: "Spain" },
-  { id: 157, name: "Barcelona, Spain", country: "Spain" },
-  { id: 290, name: "Kona", country: "Hawaii, USA" },
-  { id: 291, name: "Kona, Hawaii", country: "Hawaii, USA" }
+  { id: 479, name: "Paris, France", country: "France" },
+  { id: 334, name: "Tokyo", country: "Japan" },
+  { id: 334, name: "Tokyo, Japan", country: "Japan" },
+  { id: 737, name: "London", country: "England" },
+  { id: 737, name: "London, England", country: "England" },
+  { id: 511, name: "Rome", country: "Italy" },
+  { id: 511, name: "Rome, Italy", country: "Italy" },
+  { id: 687, name: "New York", country: "USA" },
+  { id: 687, name: "New York, USA", country: "USA" },
+  { id: 562, name: "Barcelona", country: "Spain" },
+  { id: 562, name: "Barcelona, Spain", country: "Spain" },
 ];
 
 export function registerRoutes(app: Express): Server {
