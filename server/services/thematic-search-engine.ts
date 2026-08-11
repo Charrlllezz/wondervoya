@@ -19,23 +19,6 @@ import { csvTagManager } from './csv-tag-manager';
 import type { ActivityRecommendation } from '@shared/schema';
 
 /**
- * Loose same-word check for two already-tokenized words, tolerant of
- * simple English inflection (plurals, -ing, -al) that exact word-boundary
- * matching misses — e.g. "castle" vs "castles", "history" vs "historical",
- * "snorkel" vs "snorkeling". Compares only a short shared prefix, so it's
- * approximate rather than real stemming, but that's enough to stop a
- * query word from being treated as unmatched just because the taxonomy
- * tag happens to use a different grammatical form of the same word.
- */
-function sharesWordStem(a: string, b: string): boolean {
-  if (a === b) return true;
-  const minLen = Math.min(a.length, b.length);
-  if (minLen < 3) return false;
-  const prefixLen = Math.min(5, minLen);
-  return a.slice(0, prefixLen) === b.slice(0, prefixLen);
-}
-
-/**
  * Word-boundary-aware substring check. Plain `.includes()` false-positives on
  * short keywords like "art" or "mall" matching inside unrelated words such as
  * "start"/"participant" or "small" — this avoids that.
@@ -60,6 +43,7 @@ interface ThematicSearchResult {
 interface TaxonomyContext {
   query: string;
   tagIds: number[];
+  onTopicTagIds: Set<number>;
   searchTerms: string[];
   primaryCategory: string;
 }
@@ -76,31 +60,16 @@ export class ThematicSearchEngine {
       return null;
     }
 
-    // Even with even-handed scoring, a query's own generic words ("tours",
-    // "want", "and") appear in almost every candidate tag name ("Walking
-    // Tours", "Night Tours", "Shopping Tours", ...), so using them as an
-    // on-topic signal doesn't discriminate between them at all. Filter
-    // those out so a distinctive word like "shopping" actually outweighs
-    // "tours" when deciding which matches are genuinely on-topic, rather
-    // than every tours-suffixed tag looking equally relevant.
-    const GENERIC_QUERY_WORDS = new Set([
-      'tour', 'tours', 'ticket', 'tickets', 'and', 'the', 'for', 'with',
-      'want', 'need', 'like', 'get', 'find', 'looking', 'visit', 'see',
-      'explore', 'experience', 'experiences', 'activity', 'activities',
-      'sightseeing', 'sightsee',
-    ]);
-    const queryWords = query.toLowerCase().split(/\W+/)
-      .filter(w => w.length > 2 && !GENERIC_QUERY_WORDS.has(w));
-    const onTopic = result.matchedTags.filter(t => {
-      const tagWords = t.tagName.toLowerCase().split(/\W+/);
-      return queryWords.some(qw => tagWords.some(tw => sharesWordStem(qw, tw)));
-    });
-    const rest = result.matchedTags.filter(t => !onTopic.includes(t));
-    const orderedTags = [...onTopic, ...rest];
+    // Claude's tag matching (see csv-tag-manager.ts) already filters out
+    // spurious matches before returning — unlike the old string-matching
+    // approach, there's no leftover noise here that needs a second
+    // "distinctive word" pass to separate on-topic tags from incidental
+    // ones. Every tag it returns is treated as on-topic.
+    const orderedTags = result.matchedTags;
 
     console.log(
       `🏷️ TAXONOMY MATCH: "${query}" → ${orderedTags.length} tags ` +
-      `(${result.confidence.toFixed(0)}% confidence, ${onTopic.length} on-topic): ` +
+      `(${result.confidence.toFixed(0)}% confidence): ` +
       `${orderedTags.slice(0, 6).map(t => t.tagName).join(', ')}`
     );
 
@@ -115,6 +84,7 @@ export class ThematicSearchEngine {
     return {
       query,
       tagIds: orderedTags.map(t => t.tagId),
+      onTopicTagIds: new Set(orderedTags.map(t => t.tagId)),
       searchTerms: searchTerms.length > 0 ? searchTerms : [query],
       primaryCategory: orderedTags[0]?.category || '',
     };
@@ -258,6 +228,12 @@ export class ThematicSearchEngine {
         const response = await viatorService.axiosInstance.post('/products/search', requestBody);
         const products = response.data?.products?.results || response.data?.products || [];
         console.log(`📊 TAG ${tagId}: Found ${products.length} products`);
+        // Tag each product with which taxonomy tag actually found it, so
+        // downstream aggregation can guarantee every relevant tag gets
+        // representation in the final results instead of one tag's matches
+        // (e.g. "Food Tours") crowding out another equally on-topic one
+        // (e.g. "Wine Tastings") just because it happened to score higher.
+        products.forEach((p: any) => { p._sourceTagId = tagId; });
         allProducts.push(...products);
 
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -360,6 +336,10 @@ export class ThematicSearchEngine {
           productCodes.add(product.productCode);
           product._thematicScore = result.thematicRelevance;
           product._strategy = result.strategy;
+          // taxonomyTagSearch tags each product with the specific tag that
+          // found it, so those group by tag; freetext/expanded results
+          // aren't tied to one specific tag, so they group by strategy.
+          product._sourceGroup = product._sourceTagId ? `tag:${product._sourceTagId}` : result.strategy;
           allProducts.push(product);
         }
       }
@@ -367,6 +347,57 @@ export class ThematicSearchEngine {
 
     console.log(`🔄 Combined results: ${allProducts.length} unique products from ${results.length} strategies`);
     return allProducts;
+  }
+
+  /**
+   * Interleave already score-sorted products across their source groups
+   * (tag or strategy) round-robin style — best-of-group-1, best-of-group-2,
+   * ..., then second-best-of-group-1, and so on — so a group that happens
+   * to score higher across the board doesn't crowd out an equally on-topic
+   * group entirely. Without this, results downstream of the final
+   * maxResults cutoff (and the venue-diversity cap before it) could end up
+   * drawn almost entirely from a single tag.
+   *
+   * Only tag groups that matched the user's own query words (onTopicTagIds)
+   * get this equal-billing treatment — round-robining every matched tag
+   * indiscriminately let weakly-related tags (e.g. "Glass Bottom Boat
+   * Tours" for a fishing-charter query) claim just as much space as the
+   * genuinely central ones. Non-tag-specific strategies (freetext,
+   * expanded) are treated as on-topic too, since they're already built
+   * from on-topic tag names. Everything else still appears, just ordered
+   * by score after the on-topic interleaving instead of being promoted
+   * equally.
+   */
+  private static roundRobinBySource(products: any[], onTopicTagIds: Set<number>): any[] {
+    const isOnTopicGroup = (product: any): boolean =>
+      product._sourceTagId === undefined || onTopicTagIds.has(product._sourceTagId);
+
+    const onTopicProducts = products.filter(isOnTopicGroup);
+    const otherProducts = products.filter(p => !isOnTopicGroup(p));
+
+    const groups = new Map<string, any[]>();
+    for (const product of onTopicProducts) {
+      const key = product._sourceGroup || 'other';
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(product);
+    }
+
+    const groupArrays = Array.from(groups.values());
+    const interleaved: any[] = [];
+    for (let i = 0; interleaved.length < onTopicProducts.length; i++) {
+      let addedAny = false;
+      for (const group of groupArrays) {
+        if (i < group.length) {
+          interleaved.push(group[i]);
+          addedAny = true;
+        }
+      }
+      if (!addedAny) break;
+    }
+
+    return [...interleaved, ...otherProducts];
   }
 
   /**
@@ -448,7 +479,9 @@ export class ThematicSearchEngine {
 
     filteredProducts.sort((a, b) => (b._finalThematicScore || 0) - (a._finalThematicScore || 0));
 
-    const diverseProducts = this.applyVenueDiversityFiltering(filteredProducts, context.primaryCategory);
+    const interleavedProducts = this.roundRobinBySource(filteredProducts, context.onTopicTagIds);
+
+    const diverseProducts = this.applyVenueDiversityFiltering(interleavedProducts, context.primaryCategory);
 
     console.log(`🎯 RELEVANCE FILTERING RESULT: ${products.length} → ${diverseProducts.length} products`);
 

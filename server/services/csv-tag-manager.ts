@@ -6,6 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { anthropic } from './anthropic';
 
 export interface TaxonomyTag {
   tagId: number;
@@ -32,18 +33,7 @@ class CSVTagManager {
   private tagsByCategory: Map<string, TaxonomyTag[]> = new Map();
   private searchIndex: Map<string, TaxonomyTag[]> = new Map();
   private initialized = false;
-
-  // Generic/conversational words that pass the length>2 filter but carry no
-  // category signal. Left unfiltered, a query like "spa day" matches "day"
-  // against every "X-day Tour" and calendar-holiday tag ("Boxing Day",
-  // "Australia Day", "Day of the Dead") via the partial-match fallback
-  // below, drowning out the actual "Spas"/"Spa Services" match.
-  private readonly STOPWORDS = new Set([
-    'the', 'and', 'for', 'with', 'want', 'need', 'like', 'get', 'day', 'days',
-    'trip', 'travel', 'find', 'looking', 'plan', 'planning', 'visit', 'see',
-    'explore', 'this', 'that', 'have', 'about', 'some', 'any', 'week', 'weeks',
-    'would', 'could', 'please', 'really', 'also', 'just', 'lets', "let's"
-  ]);
+  private taxonomyListing: string | null = null;
 
   // Enhanced semantic keyword expansion with hierarchical awareness
   private readonly SEMANTIC_EXPANSIONS: { [key: string]: string[] } = {
@@ -289,18 +279,124 @@ class CSVTagManager {
   }
 
   /**
-   * Find matching tags based on user interests
+   * Find matching tags based on user interests. Uses Claude to semantically
+   * match the query against the real Viator taxonomy instead of hand-built
+   * word lists and string-matching heuristics — those broke in ways that
+   * were only ever fixable by adding another hand-picked exception (see
+   * git history: GENERIC_QUERY_WORDS, STOPWORDS, promiscuityLimit). Falls
+   * back to the old string-matching algorithm only if the Claude call
+   * itself fails (network/API error), so a transient outage degrades
+   * search quality rather than breaking it outright.
    */
   async findMatchingTags(interests: string): Promise<TagSearchResult> {
     if (!this.initialized) {
       await this.initializeFromCSV();
     }
-    
+
+    console.log(`🔍 Claude tag search for: "${interests}"`);
+
+    try {
+      const tagIds = await this.matchTagsWithClaude(interests);
+      const matchedTags = this.getTagsByIds(tagIds); // preserves Claude's relevance ordering
+      const categoryBreakdown = this.getCategoryBreakdown(matchedTags);
+      const confidence = matchedTags.length > 0 ? 90 : 0;
+
+      console.log(`✅ Claude matching: ${matchedTags.length} tags`);
+      console.log(`🏷️ Top matches: ${matchedTags.slice(0, 5).map(t => t.tagName).join(', ')}`);
+
+      return {
+        matchedTags,
+        tagIds: matchedTags.map(t => t.tagId),
+        confidence,
+        categoryBreakdown
+      };
+    } catch (error) {
+      console.error('⚠️ Claude tag matching failed, falling back to string matching:', error);
+      return this.findMatchingTagsByStringMatch(interests);
+    }
+  }
+
+  /**
+   * Build the taxonomy listing sent to Claude as cached context: one line
+   * per L2/L3/L4 tag, formatted as "id: full > hierarchy > path". L1 tags
+   * are omitted — they're broad umbrella categories ("Tickets & Passes")
+   * that add noise without adding a usable search filter. Built once and
+   * reused verbatim on every call so the prompt-cache prefix stays stable.
+   */
+  private buildTaxonomyListing(): string {
+    if (this.taxonomyListing) return this.taxonomyListing;
+
+    const lines = Array.from(this.tags.values())
+      .filter(tag => tag.level !== 'L1')
+      .sort((a, b) => a.tagId - b.tagId)
+      .map(tag => `${tag.tagId}: ${tag.fullPath.join(' > ')}`);
+
+    this.taxonomyListing = lines.join('\n');
+    return this.taxonomyListing;
+  }
+
+  /**
+   * Ask Claude which taxonomy tags a free-text query is asking about.
+   * Haiku is plenty for this — it's a bounded classification task against
+   * a fixed list, not open-ended reasoning — and the taxonomy listing is
+   * cached so only the (tiny) query text is billed at full price on repeat
+   * calls.
+   */
+  private async matchTagsWithClaude(query: string): Promise<number[]> {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 512,
+      system: [
+        {
+          type: 'text',
+          text: `You are a precise taxonomy classifier for a travel activity search engine. Given a free-text query describing what a traveler wants to do, identify which categories from the Viator activity taxonomy below are genuinely relevant.
+
+Taxonomy (tag ID: full category path):
+${this.buildTaxonomyListing()}
+
+Instructions:
+- Only return tags that are genuinely relevant to what the query is asking for. Do not include a tag just because it shares a word with the query (e.g. a query about "day trips" is not about "Boxing Day" or "Valentine's Day").
+- Prefer more specific (deeper path) categories over broad ones when they fit the query well, but include a broader category if no specific one matches.
+- Order tag IDs from most to least relevant. Return at most 10.
+- If nothing in the taxonomy is genuinely relevant, return an empty array.
+
+Respond with ONLY a JSON object in this exact format, no other text, no markdown code fences:
+{"tagIds": [123, 456, 789]}`,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: [{ role: 'user', content: query }],
+    });
+
+    const responseText = response.content[0]?.type === 'text' ? response.content[0].text : '';
+
+    try {
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
+      const candidateIds: unknown[] = Array.isArray(parsed.tagIds) ? parsed.tagIds : [];
+
+      // Defensive: only trust IDs that actually exist in our taxonomy, in
+      // case the model returns a hallucinated or malformed ID.
+      return candidateIds
+        .map(id => Number(id))
+        .filter(id => Number.isInteger(id) && this.tags.has(id));
+    } catch (parseError) {
+      console.error('⚠️ Failed to parse Claude tag-matching response:', responseText, parseError);
+      return [];
+    }
+  }
+
+  /**
+   * Legacy string-matching implementation. Kept only as a fallback for
+   * when the Claude tag-matching call itself fails (network/API error) —
+   * not used in normal operation. See findMatchingTags().
+   */
+  private findMatchingTagsByStringMatch(interests: string): TagSearchResult {
     console.log(`🔍 CSV tag search for: "${interests}"`);
-    
+
     const searchTerms = this.parseInterests(interests);
     const matches = new Map<number, { tag: TaxonomyTag; score: number }>();
-    
+
     // Primary matching: exact term matches
     for (const term of searchTerms) {
       const exactMatches = this.searchIndex.get(term) || [];
@@ -312,29 +408,43 @@ class CSVTagManager {
         }
       }
     }
-    
-    // Secondary matching: partial matches
+
+    // Secondary matching: partial matches. Skip a term if it would touch
+    // an implausibly large share of the whole taxonomy (e.g. "day"
+    // matching every "X-day Tour" and "Boxing Day" tag) — that's a common
+    // substring, not a meaningful relevance signal.
     if (matches.size < 5) {
+      const promiscuityLimit = Math.max(8, Math.round(this.tags.size * 0.04));
+
       for (const term of searchTerms) {
+        const termMatches: TaxonomyTag[][] = [];
+        const matchingTagIds = new Set<number>();
         for (const [indexTerm, tags] of Array.from(this.searchIndex.entries())) {
           if (indexTerm.includes(term) || term.includes(indexTerm)) {
-            for (const tag of tags) {
-              if (!matches.has(tag.tagId)) {
-                const score = this.calculateTagScore(tag, term, searchTerms) * 0.7; // Reduced score for partial matches
-                matches.set(tag.tagId, { tag, score });
-              }
+            termMatches.push(tags);
+            tags.forEach(tag => matchingTagIds.add(tag.tagId));
+          }
+        }
+
+        if (matchingTagIds.size > promiscuityLimit) continue;
+
+        for (const tags of termMatches) {
+          for (const tag of tags) {
+            if (!matches.has(tag.tagId)) {
+              const score = this.calculateTagScore(tag, term, searchTerms) * 0.7; // Reduced score for partial matches
+              matches.set(tag.tagId, { tag, score });
             }
           }
         }
       }
     }
-    
+
     // Sort by score, prioritize L3/L4 tags, and limit results
     const sortedMatches = Array.from(matches.values())
       .filter(m => m.tag.level === 'L3' || m.tag.level === 'L4') // L3/L4 only
       .sort((a, b) => b.score - a.score)
       .slice(0, 12);
-    
+
     // If we have too few L3/L4 results, add some L2 as backup
     if (sortedMatches.length < 5) {
       const l2Backup = Array.from(matches.values())
@@ -343,14 +453,14 @@ class CSVTagManager {
         .slice(0, 3);
       sortedMatches.push(...l2Backup);
     }
-    
+
     const matchedTags = sortedMatches.map(m => m.tag);
     const confidence = this.calculateConfidence(matchedTags, searchTerms);
     const categoryBreakdown = this.getCategoryBreakdown(matchedTags);
-    
+
     console.log(`✅ CSV matching: ${matchedTags.length} tags, ${confidence.toFixed(1)}% confidence`);
     console.log(`🏷️ Top matches: ${matchedTags.slice(0, 5).map(t => t.tagName).join(', ')}`);
-    
+
     return {
       matchedTags,
       tagIds: matchedTags.map(t => t.tagId),
@@ -369,7 +479,7 @@ class CSVTagManager {
       .map(term => term.trim())
       .filter(term => term.length > 2)
       .map(term => term.replace(/[^\w\s]/g, ''))
-      .filter(term => term.length > 0 && !this.STOPWORDS.has(term));
+      .filter(term => term.length > 0);
     
     // Add semantic expansions
     const expandedTerms = new Set(terms);
@@ -569,6 +679,15 @@ class CSVTagManager {
     }
     
     return breakdown;
+  }
+
+  /**
+   * Get every tag's name — used to measure how common/distinctive a word
+   * is across the real taxonomy, rather than hand-maintaining a list of
+   * words assumed to be "too generic."
+   */
+  getAllTagNames(): string[] {
+    return Array.from(this.tags.values()).map(t => t.tagName);
   }
 
   /**

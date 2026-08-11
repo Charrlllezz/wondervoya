@@ -5,7 +5,7 @@ import { enhancedViatorService } from './enhanced-viator';
 import { multiProviderSearchEngine } from './multi-provider-search';
 
 // the newest Anthropic model is "claude-sonnet-4-20250514" which was released May 14, 2025. Use this by default unless user has already selected claude-3-7-sonnet-20250219
-const anthropic = new Anthropic({
+export const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '',
 });
 

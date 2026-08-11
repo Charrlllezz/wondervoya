@@ -95,45 +95,19 @@ function extractPartySize(message: string): number | undefined {
   return undefined;
 }
 
+// Used to be a hardcoded set of ~8 keyword buckets (museum/art, food,
+// adventure, water, fishing, royal/castle, ninja/samurai, generic tours)
+// that every free-text query got squeezed into before search. Any query
+// whose actual subject wasn't in one of those buckets — spa, wellness,
+// shopping, nightlife, photography, ... — had its real content silently
+// discarded and replaced with whichever generic bucket happened to match
+// (usually "tours sightseeing"), which downstream taxonomy matching never
+// saw. Now that tag matching (csv-tag-manager.ts) does real semantic
+// matching against the full taxonomy via Claude, this pre-bucketing step
+// only threw away information Claude could have used — so it's removed
+// rather than grown to cover more buckets.
 function extractActivityKeywords(message: string, preferences: any): string {
-  const msg = message.toLowerCase();
-
-  const activityTerms: string[] = [];
-
-  // Word-boundary matching: the unbounded version of these regexes matched
-  // "art" inside "charters" and similar false positives, silently injecting
-  // "museum cultural art" into unrelated fishing/adventure queries and
-  // hijacking downstream theme detection.
-  if (/\b(museum|art|gallery|exhibition|culture|history)\b/.test(msg)) {
-    activityTerms.push('museum', 'cultural', 'art');
-  }
-  if (/\b(food|restaurant|culinary|dining|eat|taste)\b/.test(msg)) {
-    activityTerms.push('food', 'culinary', 'dining');
-  }
-  if (/\b(adventure|outdoor|hiking|kayak|bike|climb)\b/.test(msg)) {
-    activityTerms.push('adventure', 'outdoor');
-  }
-  if (/\b(beach|water|swim|surf|dive|snorkel)\b/.test(msg)) {
-    activityTerms.push('beach', 'water sports');
-  }
-  if (/\b(fish|fishing|charter)\b/.test(msg)) {
-    activityTerms.push('fishing', 'charter', 'boat');
-  }
-  // These two categories were previously missing entirely, so a query like
-  // "royal palaces and castles" that also happened to match the generic
-  // tour/sightseeing bucket below had its actual subject silently dropped,
-  // leaving only "tours sightseeing" for theme detection to work with.
-  if (/\b(royal|castle|palace|king|queen|knight|medieval|throne|monarchy)\b/.test(msg)) {
-    activityTerms.push('royal', 'castle', 'palace', 'history');
-  }
-  if (/\b(ninja|samurai|martial arts|katana|dojo|shogun|bushido)\b/.test(msg)) {
-    activityTerms.push('ninja', 'samurai', 'cultural');
-  }
-  if (/\b(tour|sightseeing|visit|see|explore)\b/.test(msg)) {
-    activityTerms.push('tours', 'sightseeing');
-  }
-
-  return activityTerms.length > 0 ? activityTerms.join(' ') : message;
+  return message;
 }
 
 function cleanSearchQuery(query: string): string {
