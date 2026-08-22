@@ -274,6 +274,14 @@ export function ItineraryManager({ isOpen, onClose, activity, onSave, sessionId 
     const location = getActivityLocation(activityData);
     const title = activityData.title?.toLowerCase() || '';
 
+    // getActivityLocation() itself falls back to this literal string when no
+    // real location can be resolved — interpolating it into the templates
+    // below would produce nonsense like "Majestic Location not specified
+    // Journey", so skip straight to a location-free title instead.
+    if (location === 'Location not specified') {
+      return 'New Adventure';
+    }
+
     // Extract city name for more natural titles
     const cityName = location.split(',')[0]; // Get just "Paris" from "Paris, France"
 
@@ -390,7 +398,11 @@ export function ItineraryManager({ isOpen, onClose, activity, onSave, sessionId 
 
     createItineraryMutation.mutate({
         title: newItinerary.title.trim(),
-        destination: getActivityLocation(activityData) || 'Travel Destination',
+        // Prefer what the user actually typed/selected in the "Where are you
+        // going?" field — it was previously ignored in favor of the saved
+        // activity's own (often unresolved) location, silently discarding a
+        // correct destination the user had just explicitly chosen.
+        destination: newItinerary.destination || getActivityLocation(activityData) || 'Travel Destination',
         startDate,
         endDate,
         groupSize: 2,
