@@ -1105,7 +1105,9 @@ export class ViatorService {
     // Comprehensive location patterns for major destinations
     const locationPatterns = [
       // Major US Cities
-      { pattern: /los angeles|hollywood|beverly hills|santa monica|la\b/i, location: 'Los Angeles, USA' },
+      // "la\b" (no leading boundary) matched the tail of any word ending in
+      // "la" — e.g. "gondola ride" was misread as a Los Angeles mention.
+      { pattern: /los angeles|hollywood|beverly hills|santa monica|\bla\b/i, location: 'Los Angeles, USA' },
       { pattern: /new york|nyc|manhattan|brooklyn|queens|bronx/i, location: 'New York, USA' },
       { pattern: /san francisco|sf\b|silicon valley|bay area/i, location: 'San Francisco, USA' },
       { pattern: /las vegas|vegas\b/i, location: 'Las Vegas, USA' },
@@ -1122,7 +1124,7 @@ export class ViatorService {
       { pattern: /tokyo|shibuya|shinjuku|harajuku|ginza|edo/i, location: 'Tokyo, Japan' },
       { pattern: /rome|eternal city|colosseum|vatican/i, location: 'Rome, Italy' },
       { pattern: /barcelona|sagrada familia|gaudi/i, location: 'Barcelona, Spain' },
-      { pattern: /amsterdam|canals/i, location: 'Amsterdam, Netherlands' },
+      { pattern: /amsterdam/i, location: 'Amsterdam, Netherlands' },
       { pattern: /berlin|brandenburg/i, location: 'Berlin, Germany' },
       { pattern: /dubai|burj khalifa/i, location: 'Dubai, UAE' },
       { pattern: /sydney|opera house|harbour bridge/i, location: 'Sydney, Australia' },
@@ -1140,7 +1142,9 @@ export class ViatorService {
       { pattern: /cancun|riviera maya/i, location: 'Cancun, Mexico' },
       { pattern: /bali|ubud|denpasar/i, location: 'Bali, Indonesia' },
       { pattern: /santorini|mykonos|greek islands/i, location: 'Greek Islands, Greece' },
-      { pattern: /costa rica|san jose/i, location: 'Costa Rica' },
+      // "san jose" alone is ambiguous — San Jose, California is a much more
+      // common destination than Costa Rica's capital of the same name.
+      { pattern: /costa rica/i, location: 'Costa Rica' },
       { pattern: /iceland|reykjavik/i, location: 'Iceland' }
     ];
 
