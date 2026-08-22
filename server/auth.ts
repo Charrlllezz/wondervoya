@@ -1,8 +1,10 @@
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
 import type { Express, RequestHandler } from "express";
 import { storage } from "./storage";
+import { pool } from "./db";
 import type { User } from "@shared/schema";
 
 // Configure session middleware
@@ -20,7 +22,17 @@ export function getSession() {
     sessionSecret = 'wondervoya-dev-secret-DO-NOT-USE-IN-PRODUCTION';
   }
 
+  const PgStore = connectPgSimple(session);
+
   return session({
+    store: new PgStore({
+      pool,
+      tableName: 'sessions', // Matches the `sessions` table already defined in shared/schema.ts
+      // The table is managed via drizzle (npm run db:push), not created here:
+      // letting connect-pg-simple create it on every boot raced against Neon's
+      // serverless driver and crashed with "IDX_session_expire already exists".
+      createTableIfMissing: false,
+    }),
     secret: sessionSecret,
     resave: false,
     saveUninitialized: true,
