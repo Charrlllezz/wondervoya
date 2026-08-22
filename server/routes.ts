@@ -494,22 +494,30 @@ User preferences: ${JSON.stringify(conversation.travelPreferences || {})}`
             console.log(`🤖 Last message from assistant, checking conversation history for destination...`);
 
             // Look for destination in the conversation history
+            let foundInUserMessage = false;
             for (let i = conversationHistory.length - 1; i >= Math.max(0, conversationHistory.length - 5); i--) {
               const message = conversationHistory[i];
               if (message.sender === 'user') {
                 const userExtraction = smartDestinationMatcher.extractDestinationFromSearch(message.text, destinations);
                 if (userExtraction) {
                   searchContent = message.text;
+                  foundInUserMessage = true;
                   console.log(`🔍 Found destination in user message: "${message.text}"`);
                   break;
                 }
               }
             }
 
-            // Also check assistant message for destination mentions
-            const assistantExtraction = smartDestinationMatcher.extractDestinationFromSearch(lastMessage.text, destinations);
-            if (assistantExtraction && !searchContent.includes(assistantExtraction.name)) {
-              searchContent = lastMessage.text;
+            // Only fall back to the assistant's own free-text reply when no
+            // destination was found in a recent user message — otherwise a
+            // coincidental substring match in the AI's generated prose (e.g.
+            // "(San" matching "Sanya") can silently override an already-correct
+            // destination extracted from what the user actually typed.
+            if (!foundInUserMessage) {
+              const assistantExtraction = smartDestinationMatcher.extractDestinationFromSearch(lastMessage.text, destinations);
+              if (assistantExtraction) {
+                searchContent = lastMessage.text;
+              }
             }
           }
 
