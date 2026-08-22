@@ -12,4 +12,14 @@ if (!process.env.DATABASE_URL) {
 }
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Idle pooled connections can be dropped at any time (Neon autosuspend,
+// network blips, etc.) — the pg/neon Pool emits an 'error' event for this on
+// the pool itself, and Node's EventEmitter throws (crashing the whole
+// process) if nothing is listening for it. This alone kept the server up
+// through such a drop during testing.
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle database client:', err);
+});
+
 export const db = drizzle({ client: pool, schema });
